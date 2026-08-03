@@ -149,7 +149,11 @@ generate_airlock_config() {
     skip_update_line='AIRLOCK_CLAUDE_SKIP_UPDATE = "1"'
   fi
 
-  cat > airlock.local.toml <<EOF
+  # A failed write must not fall through to the launch: airlock would start on
+  # whatever airlock.local.toml a previous run left in this directory, or on its
+  # own defaults, and the deny-by-default policy this script exists to impose
+  # would silently not be the one in effect.
+  if ! cat > airlock.local.toml <<EOF
 presets = ["claude-code"]
 
 [network]
@@ -165,6 +169,10 @@ resolution = "docker"
 DISABLE_AUTOUPDATER = "1"
 $skip_update_line
 EOF
+  then
+    echo "airlock-claude: could not write airlock.local.toml in $PWD" >&2
+    exit 1
+  fi
 }
 
 # airlock hardlinks files out of HOME into its per-directory state, and a
