@@ -77,7 +77,11 @@ the logic is roughly:
    env var (`DISABLE_AUTOUPDATER=1` does not affect the explicit `claude update`
    the wrapper runs). The `claude-code` preset already allows
    `downloads.claude.ai:443`, which is where install/update fetch from, so the
-   startup update works under the deny-by-default policy.
+   startup update works under the deny-by-default policy. `airlock` forwards
+   only the env vars the config names, so a host `AIRLOCK_CLAUDE_SKIP_UPDATE`
+   is written into `[env]` too — as a variable expanded inside the heredoc, not
+   appended after it, since an appended key would join whatever table is last
+   and quietly leave `[env]` the moment another table is added below it.
 6. **Adjust `$HOME` for exotic filesystems.** If the current directory's
    filesystem root isn't `/` or `/home` (e.g. an overlay or network mount),
    `HOME` is redirected to that mount root before launching. The probe is

@@ -120,6 +120,16 @@ if [[ -n $REBUILD ]]; then
   rm -rf .airlock
 fi
 
+# airlock only passes through what the config names, so the host's opt-out has
+# to be written in to reach the VM. Built here and expanded inside [env] below
+# rather than appended after the heredoc: an appended key joins whatever table
+# ends up last, so adding a table below [env] would silently move it out and
+# stop the opt-out working.
+SKIP_UPDATE_LINE=
+if [[ -n ${AIRLOCK_CLAUDE_SKIP_UPDATE:-} ]]; then
+  SKIP_UPDATE_LINE='AIRLOCK_CLAUDE_SKIP_UPDATE = "1"'
+fi
+
 cat > airlock.local.toml <<EOF
 presets = ["claude-code"]
 
@@ -134,13 +144,8 @@ resolution = "docker"
 # The image's claude wrapper updates at startup, so the background autoupdater
 # would only duplicate that work mid-session.
 DISABLE_AUTOUPDATER = "1"
+$SKIP_UPDATE_LINE
 EOF
-
-# airlock only passes through what the config names, so forward the opt-out
-# from the host environment into the VM.
-if [[ -n ${AIRLOCK_CLAUDE_SKIP_UPDATE:-} ]]; then
-  echo 'AIRLOCK_CLAUDE_SKIP_UPDATE = "1"' >> airlock.local.toml
-fi
 
 DF="$(command -v gdf || command -v df)" || {
   echo "Neither gdf nor df found in PATH" >&2
