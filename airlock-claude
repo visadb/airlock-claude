@@ -1,6 +1,32 @@
 #!/bin/bash
 
 IMAGE=airlock-claude:latest
+REBUILD=
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -r|--rebuild-image) REBUILD=1 ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: airlock-claude [-r|--rebuild-image]
+
+Runs Claude Code sandboxed in an airlock VM in the current directory,
+building the sandbox image and generating airlock config as needed.
+
+  -r, --rebuild-image  Rebuild the sandbox image from scratch, ignoring the
+                       layer cache and re-pulling the base image, and drop
+                       the local .airlock directory so airlock converts the
+                       refreshed image instead of its cached VM disk.
+  -h, --help           Show this help.
+USAGE
+      exit 0 ;;
+    *)
+      echo "airlock-claude: unknown option: $1" >&2
+      echo "Try 'airlock-claude --help'." >&2
+      exit 2 ;;
+  esac
+  shift
+done
 
 # airlock always shells out to a literal `docker` command, so when only podman
 # is available it gets a shim that forwards to podman.
@@ -18,8 +44,13 @@ else
   exit 1
 fi
 
-if ! "$OCI" image inspect "$IMAGE" >/dev/null 2>&1; then
+if [[ -n $REBUILD ]] || ! "$OCI" image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Building $IMAGE with $OCI ..." >&2
+  # A cached rebuild would hand back the very same layers, so `-r` throws away
+  # the layer cache and re-pulls the base image — otherwise "rebuild" wouldn't
+  # pick up a new Claude Code install or newer apt packages.
+  BUILD_FLAGS=()
+  [[ -n $REBUILD ]] && BUILD_FLAGS=(--no-cache --pull)
   # Bake the host's git identity into the image so commits made inside the VM
   # are attributed correctly. `git config --list --includes` prints entries in
   # increasing precedence order, so the last occurrence of each key is the
@@ -27,7 +58,7 @@ if ! "$OCI" image inspect "$IMAGE" >/dev/null 2>&1; then
   GIT_LIST=$(git config --list --includes 2>/dev/null)
   GIT_USER_NAME=$(printf '%s\n' "$GIT_LIST" | sed -n 's/^user\.name=//p' | tail -1)
   GIT_USER_EMAIL=$(printf '%s\n' "$GIT_LIST" | sed -n 's/^user\.email=//p' | tail -1)
-  "$OCI" build -t "$IMAGE" \
+  "$OCI" build -t "$IMAGE" "${BUILD_FLAGS[@]}" \
     --build-arg "GIT_USER_NAME=$GIT_USER_NAME" \
     --build-arg "GIT_USER_EMAIL=$GIT_USER_EMAIL" - <<'DOCKERFILE' || exit 1
 FROM python:3.14-slim
@@ -81,6 +112,12 @@ ARG GIT_USER_EMAIL=
 RUN if [ -n "$GIT_USER_NAME" ]; then git config --system user.name "$GIT_USER_NAME"; fi \
  && if [ -n "$GIT_USER_EMAIL" ]; then git config --system user.email "$GIT_USER_EMAIL"; fi
 DOCKERFILE
+fi
+
+# airlock caches the VM disk it converts from the OCI image under .airlock, so
+# a freshly built image goes unused until that cache is gone.
+if [[ -n $REBUILD ]]; then
+  rm -rf .airlock
 fi
 
 cat > airlock.local.toml <<EOF

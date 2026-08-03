@@ -35,6 +35,17 @@ just to pick up a new release. Set `AIRLOCK_CLAUDE_SKIP_UPDATE=1` to skip the
 check; if it fails (no network, say), the session simply starts on the version
 already in the image.
 
+To rebuild the sandbox image from scratch — to pick up newer base packages, or
+a git identity you've changed since the image was built — run:
+
+```sh
+airlock-claude -r        # or --rebuild-image
+```
+
+That builds with no layer cache and re-pulls the base image, and removes the
+current directory's `.airlock` so `airlock` converts the new image rather than
+the VM disk it cached from the old one.
+
 If only `podman` is available, the script transparently shims a `docker`
 command that forwards to `podman`, since `airlock` always invokes `docker`
 directly.
@@ -44,15 +55,15 @@ directly.
 1. **Container engine detection** — prefers `docker`; falls back to `podman`
    via a temporary `docker`-forwarding shim if `docker` isn't installed.
 2. **Sandbox image build** — builds `airlock-claude:latest` if it doesn't
-   already exist locally, installing Claude Code into it with
-   `https://claude.ai/install.sh`. `claude` on the image's `PATH` is a small
-   wrapper that updates the install in place and then hands off to the real
-   binary, which is why a new release doesn't need an image rebuild. Your git
-   identity is read from the host at build time (the effective `user.name` and
-   `user.email` from `git config --list --includes`) and written to
-   `/etc/gitconfig` in the image, so commits made inside the VM are attributed
-   to you. Since that happens at build time, run
-   `docker rmi airlock-claude:latest` to pick up a changed identity.
+   already exist locally (or unconditionally, with `-r`), installing Claude
+   Code into it with `https://claude.ai/install.sh`. `claude` on the image's
+   `PATH` is a small wrapper that updates the install in place and then hands
+   off to the real binary, which is why a new release doesn't need an image
+   rebuild. Your git identity is read from the host at build time (the
+   effective `user.name` and `user.email` from `git config --list --includes`)
+   and written to `/etc/gitconfig` in the image, so commits made inside the VM
+   are attributed to you. Since that happens at build time, run
+   `airlock-claude -r` to pick up a changed identity.
 3. **Config generation** — writes `airlock.local.toml` in the current
    directory, configuring:
    - `network.policy = "deny-by-default"`

@@ -17,13 +17,20 @@ manifest, or test suite.
 Reading the script top to bottom is the fastest way to understand the repo;
 the logic is roughly:
 
-1. **Pick a container engine.** Prefers `docker`; if absent, falls back to
+1. **Parse arguments.** The only options are `-r`/`--rebuild-image` (forces a
+   from-scratch image build, see below) and `-h`/`--help`; anything else is a
+   usage error (exit 2). Nothing is forwarded to `claude` — the launch line at
+   the bottom is fixed.
+2. **Pick a container engine.** Prefers `docker`; if absent, falls back to
    `podman` and creates a temporary shim directory with a `docker` executable
    that forwards to `podman` (added to `PATH` for the rest of the run), since
    `airlock` always shells out to a literal `docker` command.
-2. **Build the sandbox image if missing.** `airlock-claude:latest` is built
-   from an inline Dockerfile (`python:3.14-slim` + git/curl/ripgrep/jq/etc.)
-   only when it doesn't already exist locally. The image also installs Claude
+3. **Build the sandbox image if missing (or if `-r`).** `airlock-claude:latest`
+   is built from an inline Dockerfile (`python:3.14-slim` +
+   git/curl/ripgrep/jq/etc.) when it doesn't already exist locally, or
+   unconditionally under `-r`, which also adds `--no-cache --pull` to the build
+   — a cached rebuild would just re-tag the same layers, defeating the point.
+   The image also installs Claude
    Code itself via `https://claude.ai/install.sh` — the host binary is *not*
    mounted in, because it's built for the host OS (a macOS `claude` cannot run
    in the Linux VM). Install details that matter:
@@ -55,21 +62,26 @@ the logic is roughly:
      not written; the `ARG`/`RUN` pair is kept last in the Dockerfile so a
      changed identity doesn't invalidate the cached Claude Code install above.
      Two consequences worth knowing: the identity is captured at *build* time,
-     so changing it on the host needs `docker rmi airlock-claude:latest` to
-     take effect; and because `--list --includes` picks up repo-local config,
-     whatever directory the first build runs in decides what gets baked in.
-3. **Generate `airlock.local.toml`.** Overwritten on every run — it is
-   untracked/gitignored-by-convention (there is no `.gitignore`, it's just
-   never `git add`ed). It sets `network.policy = "deny-by-default"`, points
+     so changing it on the host needs a `-r` rebuild to take effect; and
+     because `--list --includes` picks up repo-local config, whatever
+     directory the first build runs in decides what gets baked in.
+4. **Drop `.airlock` on `-r`.** `airlock` keeps its per-directory state —
+   including the VM disk it converts from the OCI image — in `.airlock/`, so a
+   rebuilt image does no good while that cache still refers to the old one.
+   `rm -rf .airlock` is unconditional (no existence check needed) but runs
+   only under `-r`; a normal run leaves the cache in place, which is what
+   makes second and later starts fast.
+5. **Generate `airlock.local.toml`.** Overwritten on every run, and gitignored.
+   It sets `network.policy = "deny-by-default"`, points
    `vm.image` at the built image, and disables the *background* autoupdater via
    env var (`DISABLE_AUTOUPDATER=1` does not affect the explicit `claude update`
    the wrapper runs). The `claude-code` preset already allows
    `downloads.claude.ai:443`, which is where install/update fetch from, so the
    startup update works under the deny-by-default policy.
-4. **Adjust `$HOME` for exotic filesystems.** If the current directory's
+6. **Adjust `$HOME` for exotic filesystems.** If the current directory's
    filesystem root isn't `/` or `/home` (e.g. an overlay or network mount),
    `HOME` is redirected to that mount root before launching.
-5. **Launch.** Runs `airlock start --monitor -- claude --dangerously-skip-permissions --remote-control`,
+7. **Launch.** Runs `airlock start --monitor -- claude --dangerously-skip-permissions --remote-control`,
    handing control to the `airlock` CLI (an external tool, not part of this
    repo) which starts the VM and execs Claude Code inside it.
 
@@ -81,9 +93,11 @@ the logic is roughly:
   the image without launching a session, extract the Dockerfile heredoc, build
   it by hand, and probe it with `docker run --rm ... claude --version`; check
   the non-root case too (`--user 1000:1000 -e HOME=/tmp/uhome`), since the VM
-  user isn't guaranteed to be root. To re-test the build itself, delete the
-  image first (`docker rmi airlock-claude:latest`) — the script only builds
-  when it's missing.
+  user isn't guaranteed to be root. To re-test the build path itself, run
+  `./airlock-claude -r` (or delete the image with
+  `docker rmi airlock-claude:latest`) — a plain run only builds when the image
+  is missing. Note `-r` is a full `--no-cache --pull` build, so it takes
+  minutes, not seconds.
 - `airlock.local.toml` and `.airlock/` are runtime artifacts produced by
   running the script / by `airlock` itself — don't hand-edit
   `airlock.local.toml` as a source file; it's regenerated (clobbered) on
