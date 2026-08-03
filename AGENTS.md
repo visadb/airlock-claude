@@ -24,6 +24,7 @@ reads as a summary of the whole thing:
 
 ```
 parse_args              # -r/--rebuild-image and -h/--help; nothing is forwarded to claude
+require_airlock         # before the build, so -r can't spend minutes then fail at the last line
 pick_container_engine   # docker, else podman behind a `docker` shim
 build_image_if_needed   # airlock-claude:latest from an inline Dockerfile
 drop_vm_cache_on_rebuild

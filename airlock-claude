@@ -34,6 +34,17 @@ parse_args() {
   done
 }
 
+# Checked here rather than left to the launch line: under -r the build spends
+# minutes on --no-cache --pull first, and failing after that hands the user
+# "line NNN: airlock: command not found" in exchange for the wait. Runs after
+# parse_args so --help still works without airlock installed.
+require_airlock() {
+  if ! command -v airlock >/dev/null 2>&1; then
+    echo "airlock not found in PATH" >&2
+    exit 1
+  fi
+}
+
 # Sets OCI, and on the podman path also SHIM_DIR and PATH. Those stay global:
 # the EXIT trap below fires long after this function has returned, and needs
 # SHIM_DIR still set to clean up.
@@ -196,6 +207,7 @@ keep_home_on_working_filesystem() {
 }
 
 parse_args "$@"
+require_airlock
 pick_container_engine
 build_image_if_needed
 drop_vm_cache_on_rebuild
