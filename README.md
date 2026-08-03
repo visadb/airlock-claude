@@ -47,7 +47,12 @@ directly.
    already exist locally, installing Claude Code into it with
    `https://claude.ai/install.sh`. `claude` on the image's `PATH` is a small
    wrapper that updates the install in place and then hands off to the real
-   binary, which is why a new release doesn't need an image rebuild.
+   binary, which is why a new release doesn't need an image rebuild. Your git
+   identity is read from the host at build time (the effective `user.name` and
+   `user.email` from `git config --list --includes`) and written to
+   `/etc/gitconfig` in the image, so commits made inside the VM are attributed
+   to you. Since that happens at build time, run
+   `docker rmi airlock-claude:latest` to pick up a changed identity.
 3. **Config generation** — writes `airlock.local.toml` in the current
    directory, configuring:
    - `network.policy = "deny-by-default"`

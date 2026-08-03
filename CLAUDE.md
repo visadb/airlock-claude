@@ -44,6 +44,20 @@ the logic is roughly:
      to the version baked into the image), and a `/tmp` stamp file limits the
      update to once per VM boot so nested `claude` calls can't swap the binary
      out from under a running session. `AIRLOCK_CLAUDE_SKIP_UPDATE=1` skips it.
+   - The host's git identity is baked in so commits made inside the VM are
+     attributed correctly. The script reads `git config --list --includes` on
+     the host and takes the *last* `user.name` / `user.email` line (that
+     listing is ordered by increasing precedence, so last = effective), passes
+     them as build args, and the image writes them with `git config --system`
+     — i.e. to `/etc/gitconfig`, so they apply whichever user the VM runs as,
+     while a real `~/.gitconfig` in the mounted home still wins. Either value
+     may be empty (host has no identity set), in which case that key is simply
+     not written; the `ARG`/`RUN` pair is kept last in the Dockerfile so a
+     changed identity doesn't invalidate the cached Claude Code install above.
+     Two consequences worth knowing: the identity is captured at *build* time,
+     so changing it on the host needs `docker rmi airlock-claude:latest` to
+     take effect; and because `--list --includes` picks up repo-local config,
+     whatever directory the first build runs in decides what gets baked in.
 3. **Generate `airlock.local.toml`.** Overwritten on every run — it is
    untracked/gitignored-by-convention (there is no `.gitignore`, it's just
    never `git add`ed). It sets `network.policy = "deny-by-default"`, points

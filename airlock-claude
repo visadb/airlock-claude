@@ -20,7 +20,16 @@ fi
 
 if ! "$OCI" image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Building $IMAGE with $OCI ..." >&2
-  "$OCI" build -t "$IMAGE" - <<'DOCKERFILE' || exit 1
+  # Bake the host's git identity into the image so commits made inside the VM
+  # are attributed correctly. `git config --list --includes` prints entries in
+  # increasing precedence order, so the last occurrence of each key is the
+  # effective one. Either may be empty (no identity configured on the host).
+  GIT_LIST=$(git config --list --includes 2>/dev/null)
+  GIT_USER_NAME=$(printf '%s\n' "$GIT_LIST" | sed -n 's/^user\.name=//p' | tail -1)
+  GIT_USER_EMAIL=$(printf '%s\n' "$GIT_LIST" | sed -n 's/^user\.email=//p' | tail -1)
+  "$OCI" build -t "$IMAGE" \
+    --build-arg "GIT_USER_NAME=$GIT_USER_NAME" \
+    --build-arg "GIT_USER_EMAIL=$GIT_USER_EMAIL" - <<'DOCKERFILE' || exit 1
 FROM python:3.14-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git curl ripgrep jq less procps unzip openssh-client \
@@ -60,6 +69,17 @@ RUN printf '%s\n' \
       'exec "$LAUNCHER" "$@"' \
       > /usr/local/bin/claude \
  && chmod +x /usr/local/bin/claude
+
+# The host's git identity, captured at build time. Written to /etc/gitconfig
+# (git's system-level config) rather than a home directory, so it applies
+# whichever user the VM runs as; a real ~/.gitconfig in the mounted home still
+# takes precedence. Kept last so changing identity doesn't invalidate the
+# cached layers above. `git config` handles quoting, so odd characters in a
+# name are safe. Either value may be empty if the host has no identity set.
+ARG GIT_USER_NAME=
+ARG GIT_USER_EMAIL=
+RUN if [ -n "$GIT_USER_NAME" ]; then git config --system user.name "$GIT_USER_NAME"; fi \
+ && if [ -n "$GIT_USER_EMAIL" ]; then git config --system user.email "$GIT_USER_EMAIL"; fi
 DOCKERFILE
 fi
 
