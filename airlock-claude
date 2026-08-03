@@ -180,7 +180,7 @@ EOF
 # boundary, which is one filesystem to the mount table but not to link(2).
 # Pointing HOME at the filesystem root of the working directory puts it on the
 # same filesystem as the state being linked into, so the links can be made.
-redirect_home_for_exotic_fs() {
+keep_home_on_working_filesystem() {
   local df_bin fs_root
   df_bin="$(command -v gdf || command -v df)" || {
     echo "Neither gdf nor df found in PATH" >&2
@@ -188,8 +188,9 @@ redirect_home_for_exotic_fs() {
   }
   # `--output` is GNU-only — BSD df rejects it, so a Mac without coreutils' gdf
   # gets no answer here. Requiring the result to look like an absolute path keeps
-  # that case a no-op: an unguarded assignment would export an empty HOME and
-  # send airlock looking for ~/.claude somewhere that doesn't exist.
+  # that case a no-op: an unguarded assignment would export an empty HOME, which
+  # relocates HOME without putting it on the working filesystem — the failure
+  # this function exists to prevent, arrived at by a different route.
   fs_root=$("$df_bin" --output=target . 2>/dev/null | tail -1)
   if [[ $fs_root == /* && $fs_root != "/" && $fs_root != "/home" ]]; then
     export HOME=$fs_root
@@ -201,6 +202,6 @@ pick_container_engine
 build_image_if_needed
 drop_vm_cache_on_rebuild
 generate_airlock_config
-redirect_home_for_exotic_fs
+keep_home_on_working_filesystem
 
 airlock start --monitor -- claude --dangerously-skip-permissions --remote-control

@@ -28,7 +28,7 @@ pick_container_engine   # docker, else podman behind a `docker` shim
 build_image_if_needed   # airlock-claude:latest from an inline Dockerfile
 drop_vm_cache_on_rebuild
 generate_airlock_config # writes airlock.local.toml
-redirect_home_for_exotic_fs
+keep_home_on_working_filesystem   # so airlock's hardlinks out of HOME can't cross a filesystem
 ```
 
 - Keep new steps as functions in that same defined-in-call-order shape.
