@@ -103,6 +103,7 @@ the logic is roughly:
   is missing. Note `-r` is a full `--no-cache --pull` build, so it takes
   minutes, not seconds.
 - `airlock.local.toml` and `.airlock/` are runtime artifacts produced by
-  running the script / by `airlock` itself — don't hand-edit
-  `airlock.local.toml` as a source file; it's regenerated (clobbered) on
+  running the script / by `airlock` itself, and both are gitignored — `.airlock/`
+  holds the VM disk, so it must never reach a commit. Don't hand-edit
+  `airlock.local.toml` as a source file either; it's regenerated (clobbered) on
   every invocation of `airlock-claude`.
