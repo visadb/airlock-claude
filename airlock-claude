@@ -1,14 +1,10 @@
 #!/bin/bash
 
 IMAGE=airlock-claude:latest
-REBUILD=
 
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    -r|--rebuild-image) REBUILD=1 ;;
-    -h|--help)
-      cat <<'USAGE'
-Usage: airlock-claude [-r|--rebuild-image]
+usage() {
+  cat <<'USAGE'
+Usage: airlock-claude [-r|--rebuild-image] [-h|--help]
 
 Runs Claude Code sandboxed in an airlock VM in the current directory,
 building the sandbox image and generating airlock config as needed.
@@ -19,48 +15,68 @@ building the sandbox image and generating airlock config as needed.
                        refreshed image instead of its cached VM disk.
   -h, --help           Show this help.
 USAGE
-      exit 0 ;;
-    *)
-      echo "airlock-claude: unknown option: $1" >&2
-      echo "Try 'airlock-claude --help'." >&2
-      exit 2 ;;
-  esac
-  shift
-done
+}
 
-# airlock always shells out to a literal `docker` command, so when only podman
-# is available it gets a shim that forwards to podman.
-if command -v docker >/dev/null 2>&1; then
-  OCI=docker
-elif command -v podman >/dev/null 2>&1; then
-  OCI=podman
-  SHIM_DIR=$(mktemp -d) || exit 1
-  trap 'rm -rf "$SHIM_DIR"' EXIT
-  printf '#!/bin/sh\nexec podman "$@"\n' > "$SHIM_DIR/docker"
-  chmod +x "$SHIM_DIR/docker"
-  export PATH="$SHIM_DIR:$PATH"
-else
-  echo "Neither docker nor podman found in PATH" >&2
-  exit 1
-fi
+# Sets REBUILD for the two steps that consult it. Nothing is forwarded to
+# claude — the launch line at the bottom is fixed.
+parse_args() {
+  REBUILD=
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      -r|--rebuild-image) REBUILD=1 ;;
+      -h|--help) usage; exit 0 ;;
+      *)
+        echo "airlock-claude: unknown option: $1" >&2
+        echo "Try 'airlock-claude --help'." >&2
+        exit 2 ;;
+    esac
+    shift
+  done
+}
 
-if [[ -n $REBUILD ]] || ! "$OCI" image inspect "$IMAGE" >/dev/null 2>&1; then
+# Sets OCI, and on the podman path also SHIM_DIR and PATH. Those stay global:
+# the EXIT trap below fires long after this function has returned, and needs
+# SHIM_DIR still set to clean up.
+pick_container_engine() {
+  # airlock always shells out to a literal `docker` command, so when only podman
+  # is available it gets a shim that forwards to podman.
+  if command -v docker >/dev/null 2>&1; then
+    OCI=docker
+  elif command -v podman >/dev/null 2>&1; then
+    OCI=podman
+    SHIM_DIR=$(mktemp -d) || exit 1
+    trap 'rm -rf "$SHIM_DIR"' EXIT
+    printf '#!/bin/sh\nexec podman "$@"\n' > "$SHIM_DIR/docker"
+    chmod +x "$SHIM_DIR/docker"
+    export PATH="$SHIM_DIR:$PATH"
+  else
+    echo "Neither docker nor podman found in PATH" >&2
+    exit 1
+  fi
+}
+
+build_image_if_needed() {
+  if [[ -z $REBUILD ]] && "$OCI" image inspect "$IMAGE" >/dev/null 2>&1; then
+    return 0
+  fi
+
   echo "Building $IMAGE with $OCI ..." >&2
   # A cached rebuild would hand back the very same layers, so `-r` throws away
   # the layer cache and re-pulls the base image — otherwise "rebuild" wouldn't
   # pick up a new Claude Code install or newer apt packages.
-  BUILD_FLAGS=()
-  [[ -n $REBUILD ]] && BUILD_FLAGS=(--no-cache --pull)
+  local build_flags=()
+  [[ -n $REBUILD ]] && build_flags=(--no-cache --pull)
   # Bake the host's git identity into the image so commits made inside the VM
   # are attributed correctly. `git config --list --includes` prints entries in
   # increasing precedence order, so the last occurrence of each key is the
   # effective one. Either may be empty (no identity configured on the host).
-  GIT_LIST=$(git config --list --includes 2>/dev/null)
-  GIT_USER_NAME=$(printf '%s\n' "$GIT_LIST" | sed -n 's/^user\.name=//p' | tail -1)
-  GIT_USER_EMAIL=$(printf '%s\n' "$GIT_LIST" | sed -n 's/^user\.email=//p' | tail -1)
-  "$OCI" build -t "$IMAGE" "${BUILD_FLAGS[@]}" \
-    --build-arg "GIT_USER_NAME=$GIT_USER_NAME" \
-    --build-arg "GIT_USER_EMAIL=$GIT_USER_EMAIL" - <<'DOCKERFILE' || exit 1
+  local git_list git_user_name git_user_email
+  git_list=$(git config --list --includes 2>/dev/null)
+  git_user_name=$(printf '%s\n' "$git_list" | sed -n 's/^user\.name=//p' | tail -1)
+  git_user_email=$(printf '%s\n' "$git_list" | sed -n 's/^user\.email=//p' | tail -1)
+  "$OCI" build -t "$IMAGE" "${build_flags[@]}" \
+    --build-arg "GIT_USER_NAME=$git_user_name" \
+    --build-arg "GIT_USER_EMAIL=$git_user_email" - <<'DOCKERFILE' || exit 1
 FROM python:3.14-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git curl ripgrep jq less procps unzip openssh-client \
@@ -112,25 +128,28 @@ ARG GIT_USER_EMAIL=
 RUN if [ -n "$GIT_USER_NAME" ]; then git config --system user.name "$GIT_USER_NAME"; fi \
  && if [ -n "$GIT_USER_EMAIL" ]; then git config --system user.email "$GIT_USER_EMAIL"; fi
 DOCKERFILE
-fi
+}
 
 # airlock caches the VM disk it converts from the OCI image under .airlock, so
 # a freshly built image goes unused until that cache is gone.
-if [[ -n $REBUILD ]]; then
-  rm -rf .airlock
-fi
+drop_vm_cache_on_rebuild() {
+  if [[ -n $REBUILD ]]; then
+    rm -rf .airlock
+  fi
+}
 
-# airlock only passes through what the config names, so the host's opt-out has
-# to be written in to reach the VM. Built here and expanded inside [env] below
-# rather than appended after the heredoc: an appended key joins whatever table
-# ends up last, so adding a table below [env] would silently move it out and
-# stop the opt-out working.
-SKIP_UPDATE_LINE=
-if [[ -n ${AIRLOCK_CLAUDE_SKIP_UPDATE:-} ]]; then
-  SKIP_UPDATE_LINE='AIRLOCK_CLAUDE_SKIP_UPDATE = "1"'
-fi
+generate_airlock_config() {
+  # airlock only passes through what the config names, so the host's opt-out has
+  # to be written in to reach the VM. Built here and expanded inside [env] below
+  # rather than appended after the heredoc: an appended key joins whatever table
+  # ends up last, so adding a table below [env] would silently move it out and
+  # stop the opt-out working.
+  local skip_update_line=
+  if [[ -n ${AIRLOCK_CLAUDE_SKIP_UPDATE:-} ]]; then
+    skip_update_line='AIRLOCK_CLAUDE_SKIP_UPDATE = "1"'
+  fi
 
-cat > airlock.local.toml <<EOF
+  cat > airlock.local.toml <<EOF
 presets = ["claude-code"]
 
 [network]
@@ -144,20 +163,31 @@ resolution = "docker"
 # The image's claude wrapper updates at startup, so the background autoupdater
 # would only duplicate that work mid-session.
 DISABLE_AUTOUPDATER = "1"
-$SKIP_UPDATE_LINE
+$skip_update_line
 EOF
-
-DF="$(command -v gdf || command -v df)" || {
-  echo "Neither gdf nor df found in PATH" >&2
-  exit 1
 }
-# `--output` is GNU-only — BSD df rejects it, so a Mac without coreutils' gdf
-# gets no answer here. Requiring the result to look like an absolute path keeps
-# that case a no-op: an unguarded assignment would export an empty HOME and
-# send airlock looking for ~/.claude somewhere that doesn't exist.
-FS_ROOT=$("$DF" --output=target . 2>/dev/null | tail -1)
-if [[ $FS_ROOT == /* && $FS_ROOT != "/" && $FS_ROOT != "/home" ]]; then
-  export HOME=$FS_ROOT
-fi
+
+redirect_home_for_exotic_fs() {
+  local df_bin fs_root
+  df_bin="$(command -v gdf || command -v df)" || {
+    echo "Neither gdf nor df found in PATH" >&2
+    exit 1
+  }
+  # `--output` is GNU-only — BSD df rejects it, so a Mac without coreutils' gdf
+  # gets no answer here. Requiring the result to look like an absolute path keeps
+  # that case a no-op: an unguarded assignment would export an empty HOME and
+  # send airlock looking for ~/.claude somewhere that doesn't exist.
+  fs_root=$("$df_bin" --output=target . 2>/dev/null | tail -1)
+  if [[ $fs_root == /* && $fs_root != "/" && $fs_root != "/home" ]]; then
+    export HOME=$fs_root
+  fi
+}
+
+parse_args "$@"
+pick_container_engine
+build_image_if_needed
+drop_vm_cache_on_rebuild
+generate_airlock_config
+redirect_home_for_exotic_fs
 
 airlock start --monitor -- claude --dangerously-skip-permissions --remote-control

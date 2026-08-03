@@ -14,26 +14,32 @@ manifest, or test suite.
 
 ## How `airlock-claude` works
 
-Reading the script top to bottom is the fastest way to understand the repo;
-the logic is roughly:
+Each step below is one function; they're defined in order and called in that
+order at the bottom of the script, so the call sequence at the end reads as a
+summary of the whole thing. The `airlock start` line is deliberately *not* in a
+function — it's the handoff, and keeping it at top level means the question
+"what does this script ultimately run?" is answered by the last line. Only
+`IMAGE` and the flags/handles that outlive their function (`REBUILD`, `OCI`,
+`SHIM_DIR` — the last because the `EXIT` trap fires long after
+`pick_container_engine` has returned) are global; everything else is `local`.
 
-1. **Parse arguments.** The only options are `-r`/`--rebuild-image` (forces a
-   from-scratch image build, see below) and `-h`/`--help`; anything else is a
-   usage error (exit 2). Nothing is forwarded to `claude` — the launch line at
-   the bottom is fixed.
-2. **Pick a container engine.** Prefers `docker`; if absent, falls back to
-   `podman` and creates a temporary shim directory with a `docker` executable
-   that forwards to `podman` (added to `PATH` for the rest of the run), since
-   `airlock` always shells out to a literal `docker` command.
-3. **Build the sandbox image if missing (or if `-r`).** `airlock-claude:latest`
-   is built from an inline Dockerfile (`python:3.14-slim` +
-   git/curl/ripgrep/jq/etc.) when it doesn't already exist locally, or
-   unconditionally under `-r`, which also adds `--no-cache --pull` to the build
-   — a cached rebuild would just re-tag the same layers, defeating the point.
-   The image also installs Claude
-   Code itself via `https://claude.ai/install.sh` — the host binary is *not*
-   mounted in, because it's built for the host OS (a macOS `claude` cannot run
-   in the Linux VM). Install details that matter:
+1. **Parse arguments** (`parse_args`). The only options are
+   `-r`/`--rebuild-image` (forces a from-scratch image build, see below) and
+   `-h`/`--help`; anything else is a usage error (exit 2). Nothing is forwarded
+   to `claude` — the launch line at the bottom is fixed.
+2. **Pick a container engine** (`pick_container_engine`). Prefers `docker`; if
+   absent, falls back to `podman` and creates a temporary shim directory with a
+   `docker` executable that forwards to `podman` (added to `PATH` for the rest
+   of the run), since `airlock` always shells out to a literal `docker` command.
+3. **Build the sandbox image if missing, or if `-r`**
+   (`build_image_if_needed`). `airlock-claude:latest` is built from an inline
+   Dockerfile (`python:3.14-slim` + git/curl/ripgrep/jq/etc.) when it doesn't
+   already exist locally, or unconditionally under `-r`, which also adds
+   `--no-cache --pull` to the build — a cached rebuild would just re-tag the
+   same layers, defeating the point. The image also installs Claude Code itself
+   via `https://claude.ai/install.sh` — the host binary is *not* mounted in,
+   because it's built for the host OS (a macOS `claude` cannot run in the Linux
+   VM). Install details that matter:
    - It installs under a fixed `HOME` (`/opt/claude`, exported as
      `CLAUDE_INSTALL_HOME`) so the launcher path doesn't depend on which user
      the VM runs as, and the tree is left world-writable (`chmod -R a+rwX`) so
@@ -65,31 +71,34 @@ the logic is roughly:
      so changing it on the host needs a `-r` rebuild to take effect; and
      because `--list --includes` picks up repo-local config, whatever
      directory the first build runs in decides what gets baked in.
-4. **Drop `.airlock` on `-r`.** `airlock` keeps its per-directory state —
-   including the VM disk it converts from the OCI image — in `.airlock/`, so a
-   rebuilt image does no good while that cache still refers to the old one.
+4. **Drop `.airlock` on `-r`** (`drop_vm_cache_on_rebuild`). `airlock` keeps its
+   per-directory state — including the VM disk it converts from the OCI image —
+   in `.airlock/`, so a rebuilt image does no good while that cache still refers
+   to the old one.
    `rm -rf .airlock` is unconditional (no existence check needed) but runs
    only under `-r`; a normal run leaves the cache in place, which is what
    makes second and later starts fast.
-5. **Generate `airlock.local.toml`.** Overwritten on every run, and gitignored.
-   It sets `network.policy = "deny-by-default"`, points
-   `vm.image` at the built image, and disables the *background* autoupdater via
-   env var (`DISABLE_AUTOUPDATER=1` does not affect the explicit `claude update`
-   the wrapper runs). The `claude-code` preset already allows
-   `downloads.claude.ai:443`, which is where install/update fetch from, so the
-   startup update works under the deny-by-default policy. `airlock` forwards
-   only the env vars the config names, so a host `AIRLOCK_CLAUDE_SKIP_UPDATE`
-   is written into `[env]` too — as a variable expanded inside the heredoc, not
-   appended after it, since an appended key would join whatever table is last
-   and quietly leave `[env]` the moment another table is added below it.
-6. **Adjust `$HOME` for exotic filesystems.** If the current directory's
-   filesystem root isn't `/` or `/home` (e.g. an overlay or network mount),
-   `HOME` is redirected to that mount root before launching. The probe is
-   `df --output=target`, which is GNU-only — hence the preference for
-   coreutils' `gdf`, and hence the check that the answer is an absolute path
-   before using it: on a Mac without `gdf` there is no answer, and assigning
-   the empty result would export an empty `HOME`.
-7. **Launch.** Runs `airlock start --monitor -- claude --dangerously-skip-permissions --remote-control`,
+5. **Generate `airlock.local.toml`** (`generate_airlock_config`). Overwritten
+   on every run, and gitignored. It sets `network.policy = "deny-by-default"`,
+   points `vm.image` at the built image, and disables the *background*
+   autoupdater via env var (`DISABLE_AUTOUPDATER=1` does not affect the
+   explicit `claude update` the wrapper runs). The `claude-code` preset already
+   allows `downloads.claude.ai:443`, which is where install/update fetch from,
+   so the startup update works under the deny-by-default policy. `airlock`
+   forwards only the env vars the config names, so a host
+   `AIRLOCK_CLAUDE_SKIP_UPDATE` is written into `[env]` too — as a variable
+   expanded inside the heredoc, not appended after it, since an appended key
+   would join whatever table is last and quietly leave `[env]` the moment
+   another table is added below it.
+6. **Adjust `$HOME` for exotic filesystems** (`redirect_home_for_exotic_fs`).
+   If the current directory's filesystem root isn't `/` or `/home` (e.g. an
+   overlay or network mount), `HOME` is redirected to that mount root before
+   launching. The probe is `df --output=target`, which is GNU-only — hence the
+   preference for coreutils' `gdf`, and hence the check that the answer is an
+   absolute path before using it: on a Mac without `gdf` there is no answer,
+   and assigning the empty result would export an empty `HOME`.
+7. **Launch** (top level, no function). Runs
+   `airlock start --monitor -- claude --dangerously-skip-permissions --remote-control`,
    handing control to the `airlock` CLI (an external tool, not part of this
    repo) which starts the VM and execs Claude Code inside it.
 
@@ -107,7 +116,7 @@ the logic is roughly:
   is missing. Note `-r` is a full `--no-cache --pull` build, so it takes
   minutes, not seconds.
 - `airlock.local.toml` and `.airlock/` are runtime artifacts produced by
-  running the script / by `airlock` itself, and both are gitignored — `.airlock/`
-  holds the VM disk, so it must never reach a commit. Don't hand-edit
-  `airlock.local.toml` as a source file either; it's regenerated (clobbered) on
-  every invocation of `airlock-claude`.
+  running the script / by `airlock` itself, and both are gitignored —
+  `.airlock/` holds the VM disk, so it must never reach a commit. Don't
+  hand-edit `airlock.local.toml` as a source file either; it's regenerated
+  (clobbered) on every invocation of `airlock-claude`.
