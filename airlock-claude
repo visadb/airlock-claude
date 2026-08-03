@@ -146,8 +146,12 @@ DF="$(command -v gdf || command -v df)" || {
   echo "Neither gdf nor df found in PATH" >&2
   exit 1
 }
-FS_ROOT=$($DF --output=target . | tail -1)
-if [[ $FS_ROOT != "/" && $FS_ROOT != "/home" ]]; then
+# `--output` is GNU-only — BSD df rejects it, so a Mac without coreutils' gdf
+# gets no answer here. Requiring the result to look like an absolute path keeps
+# that case a no-op: an unguarded assignment would export an empty HOME and
+# send airlock looking for ~/.claude somewhere that doesn't exist.
+FS_ROOT=$("$DF" --output=target . 2>/dev/null | tail -1)
+if [[ $FS_ROOT == /* && $FS_ROOT != "/" && $FS_ROOT != "/home" ]]; then
   export HOME=$FS_ROOT
 fi
 

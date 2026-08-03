@@ -80,7 +80,11 @@ the logic is roughly:
    startup update works under the deny-by-default policy.
 6. **Adjust `$HOME` for exotic filesystems.** If the current directory's
    filesystem root isn't `/` or `/home` (e.g. an overlay or network mount),
-   `HOME` is redirected to that mount root before launching.
+   `HOME` is redirected to that mount root before launching. The probe is
+   `df --output=target`, which is GNU-only — hence the preference for
+   coreutils' `gdf`, and hence the check that the answer is an absolute path
+   before using it: on a Mac without `gdf` there is no answer, and assigning
+   the empty result would export an empty `HOME`.
 7. **Launch.** Runs `airlock start --monitor -- claude --dangerously-skip-permissions --remote-control`,
    handing control to the `airlock` CLI (an external tool, not part of this
    repo) which starts the VM and execs Claude Code inside it.
