@@ -63,6 +63,13 @@ Things that aren't visible from the script or its comments:
 - **`airlock` forwards only the env vars the config names**, which is why a
   host `AIRLOCK_CLAUDE_SKIP_UPDATE` has to be written into `[env]` to reach the
   VM at all.
+- **The `HOME` redirect exists because `airlock` hardlinks files out of `HOME`**
+  into its per-directory state, and a hardlink can't cross a filesystem
+  boundary. btrfs subvolumes are the case that surprises people: one mount, but
+  separate filesystems as far as `link(2)` is concerned, so the links fail with
+  `EXDEV`. Repointing `HOME` at the working directory's filesystem root is what
+  puts source and destination on one filesystem. Anything that changes that
+  function has to keep that property — it's not about where config is *findable*.
 
 ## Working on this script
 

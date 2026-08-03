@@ -167,6 +167,11 @@ $skip_update_line
 EOF
 }
 
+# airlock hardlinks files out of HOME into its per-directory state, and a
+# hardlink can't cross a filesystem boundary — including a btrfs subvolume
+# boundary, which is one filesystem to the mount table but not to link(2).
+# Pointing HOME at the filesystem root of the working directory puts it on the
+# same filesystem as the state being linked into, so the links can be made.
 redirect_home_for_exotic_fs() {
   local df_bin fs_root
   df_bin="$(command -v gdf || command -v df)" || {

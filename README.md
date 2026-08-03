@@ -13,7 +13,7 @@ no config to hand-write.
 
 You don't need Claude Code installed on the host — it's installed into the
 sandbox image, so this works the same on macOS and Linux. Your host `~/.claude`
-is mounted into the VM, so an existing login carries over.
+is carried into the VM, so an existing login carries over.
 
 ## Usage
 
@@ -78,10 +78,13 @@ a plain run only builds when the image is missing.
    - the sandbox VM image to use
    - `DISABLE_AUTOUPDATER=1` in the VM environment (that only turns off the
      *background* updater — the startup update still runs)
-4. **Home directory adjustment** — if the current directory sits on an exotic
-   filesystem (an overlay or network mount rather than `/` or `/home`), `HOME`
-   is pointed at that mount root so `airlock` finds your Claude Code config
-   where the VM can actually reach it.
+4. **Home directory adjustment** — `airlock` hardlinks files out of `HOME` into
+   its per-directory state, and a hardlink can't cross a filesystem boundary —
+   including a btrfs subvolume boundary, which isn't a separate mount but is a
+   separate filesystem as far as `link(2)` is concerned. So when the working
+   directory's filesystem root is something other than `/` or `/home`, `HOME`
+   is repointed at that root, putting it on the same filesystem as the state
+   being linked into.
 5. **Launch** — runs `airlock start --monitor -- claude --dangerously-skip-permissions --remote-control`,
    handing off to `airlock` to start the VM and run Claude Code inside it.
 
