@@ -10,7 +10,9 @@ no config to hand-write.
 
 - `docker` or `podman` (used to build/run the sandbox VM image)
 - `airlock` (the sandboxing CLI that starts the VM)
-- `claude` (the Claude Code CLI) available in `PATH`
+
+You don't need Claude Code installed on the host — it's installed into the
+sandbox image, so this works the same on macOS and Linux.
 
 ## Usage
 
@@ -23,9 +25,15 @@ airlock-claude
 That's it — no per-project setup required. The first run in any environment
 builds a local `airlock-claude:latest` image (a minimal `python:3.14-slim`
 base with `git`, `curl`, `ripgrep`, `jq`, `less`, `procps`, `unzip`, and
-`openssh-client`); every run after that reuses it. Each invocation writes a
-fresh `airlock.local.toml` for the current directory and starts Claude Code
-inside an `airlock` VM with network access denied by default.
+`openssh-client`, plus Claude Code itself); every run after that reuses it.
+Each invocation writes a fresh `airlock.local.toml` for the current directory
+and starts Claude Code inside an `airlock` VM with network access denied by
+default.
+
+Claude Code updates itself at startup, so you never have to rebuild the image
+just to pick up a new release. Set `AIRLOCK_CLAUDE_SKIP_UPDATE=1` to skip the
+check; if it fails (no network, say), the session simply starts on the version
+already in the image.
 
 If only `podman` is available, the script transparently shims a `docker`
 command that forwards to `podman`, since `airlock` always invokes `docker`
@@ -36,14 +44,16 @@ directly.
 1. **Container engine detection** — prefers `docker`; falls back to `podman`
    via a temporary `docker`-forwarding shim if `docker` isn't installed.
 2. **Sandbox image build** — builds `airlock-claude:latest` if it doesn't
-   already exist locally.
+   already exist locally, installing Claude Code into it with
+   `https://claude.ai/install.sh`. `claude` on the image's `PATH` is a small
+   wrapper that updates the install in place and then hands off to the real
+   binary, which is why a new release doesn't need an image rebuild.
 3. **Config generation** — writes `airlock.local.toml` in the current
    directory, configuring:
    - `network.policy = "deny-by-default"`
    - the sandbox VM image to use
-   - a read-only mount of the host's `claude` binary into the VM at
-     `/usr/local/bin/claude`
-   - `DISABLE_AUTOUPDATER=1` in the VM environment
+   - `DISABLE_AUTOUPDATER=1` in the VM environment (that only turns off the
+     *background* updater — the startup update still runs)
 4. **Launch** — runs `airlock start --monitor -- claude --dangerously-skip-permissions --remote-control`,
    handing off to `airlock` to start the VM and run Claude Code inside it.
 

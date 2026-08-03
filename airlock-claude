@@ -25,13 +25,44 @@ FROM python:3.14-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git curl ripgrep jq less procps unzip openssh-client \
  && rm -rf /var/lib/apt/lists/*
+
+# Claude Code is installed into the image rather than bind-mounted from the
+# host: the host binary is built for the host OS, so a macOS `claude` cannot
+# run inside the Linux VM. It goes under a fixed HOME so the launcher path
+# doesn't depend on which user the VM ends up running as, and is left
+# world-writable so a non-root VM user can still update it.
+ENV CLAUDE_INSTALL_HOME=/opt/claude
+# Appended, not prepended: /usr/local/bin stays ahead so `claude` resolves to
+# the self-updating wrapper below, but the install dir being on PATH at all
+# stops Claude Code warning about it on every update.
+ENV PATH="$PATH:/opt/claude/.local/bin"
+RUN mkdir -p "$CLAUDE_INSTALL_HOME" \
+ && HOME="$CLAUDE_INSTALL_HOME" sh -c 'curl -fsSL https://claude.ai/install.sh | bash' \
+ && chmod -R a+rwX "$CLAUDE_INSTALL_HOME"
+
+# `claude` on PATH is a wrapper that updates in place before handing off, so a
+# new Claude Code release doesn't need an image rebuild. The update endpoint
+# (downloads.claude.ai) is already allowed by airlock's claude-code preset.
+# HOME is overridden for the update only, so the updater resolves the image's
+# install instead of the VM user's home; the session itself keeps the real HOME
+# (that's where airlock mounts ~/.claude and ~/.claude.json).
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'LAUNCHER="${CLAUDE_INSTALL_HOME:-/opt/claude}/.local/bin/claude"' \
+      'STAMP=/tmp/.airlock-claude-updated' \
+      '# Update once per VM boot: nested `claude` calls must not swap the' \
+      '# binary out from under a running session.' \
+      'if [ -z "$AIRLOCK_CLAUDE_SKIP_UPDATE" ] && [ ! -e "$STAMP" ]; then' \
+      '  : > "$STAMP" 2>/dev/null' \
+      '  HOME="${CLAUDE_INSTALL_HOME:-/opt/claude}" "$LAUNCHER" update >&2 ||' \
+      '    echo "airlock-claude: update failed, using the version from the image" >&2' \
+      'fi' \
+      'exec "$LAUNCHER" "$@"' \
+      > /usr/local/bin/claude \
+ && chmod +x /usr/local/bin/claude
 DOCKERFILE
 fi
 
-CLAUDE_BIN=$(readlink -f "$(command -v claude)") || {
-  echo "claude not found in PATH" >&2
-  exit 1
-}
 cat > airlock.local.toml <<EOF
 presets = ["claude-code"]
 
@@ -42,14 +73,17 @@ policy = "deny-by-default"
 name = "$IMAGE"
 resolution = "docker"
 
-[mounts.claude-bin]
-source = "$CLAUDE_BIN"
-target = "/usr/local/bin/claude"
-read_only = true
-
 [env]
+# The image's claude wrapper updates at startup, so the background autoupdater
+# would only duplicate that work mid-session.
 DISABLE_AUTOUPDATER = "1"
 EOF
+
+# airlock only passes through what the config names, so forward the opt-out
+# from the host environment into the VM.
+if [[ -n ${AIRLOCK_CLAUDE_SKIP_UPDATE:-} ]]; then
+  echo 'AIRLOCK_CLAUDE_SKIP_UPDATE = "1"' >> airlock.local.toml
+fi
 
 DF="$(command -v gdf || command -v df)" || {
   echo "Neither gdf nor df found in PATH" >&2

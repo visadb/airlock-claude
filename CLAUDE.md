@@ -23,26 +23,53 @@ the logic is roughly:
    `airlock` always shells out to a literal `docker` command.
 2. **Build the sandbox image if missing.** `airlock-claude:latest` is built
    from an inline Dockerfile (`python:3.14-slim` + git/curl/ripgrep/jq/etc.)
-   only when it doesn't already exist locally.
-3. **Resolve the host `claude` binary.** Uses `readlink -f "$(command -v claude)"`
-   so the real binary is bind-mounted into the VM read-only.
-4. **Generate `airlock.local.toml`.** Overwritten on every run — it is
+   only when it doesn't already exist locally. The image also installs Claude
+   Code itself via `https://claude.ai/install.sh` — the host binary is *not*
+   mounted in, because it's built for the host OS (a macOS `claude` cannot run
+   in the Linux VM). Install details that matter:
+   - It installs under a fixed `HOME` (`/opt/claude`, exported as
+     `CLAUDE_INSTALL_HOME`) so the launcher path doesn't depend on which user
+     the VM runs as, and the tree is left world-writable (`chmod -R a+rwX`) so
+     a non-root VM user can still update it.
+   - `/opt/claude/.local/bin` is *appended* to `PATH` — `/usr/local/bin` must
+     stay ahead of it so `claude` resolves to the wrapper below, but having the
+     install dir on `PATH` at all suppresses Claude Code's "not in your PATH"
+     warning on every update.
+   - `/usr/local/bin/claude` is a wrapper that runs `claude update` (with `HOME`
+     pointed at `/opt/claude`, so the updater resolves the image's install
+     rather than the VM user's home) and then `exec`s the real launcher with
+     the session's real `HOME`. This is what lets a new Claude Code release
+     land without rebuilding the image. Update output goes to stderr so
+     `claude -p` stdout stays clean, a failed update is non-fatal (falls back
+     to the version baked into the image), and a `/tmp` stamp file limits the
+     update to once per VM boot so nested `claude` calls can't swap the binary
+     out from under a running session. `AIRLOCK_CLAUDE_SKIP_UPDATE=1` skips it.
+3. **Generate `airlock.local.toml`.** Overwritten on every run — it is
    untracked/gitignored-by-convention (there is no `.gitignore`, it's just
    never `git add`ed). It sets `network.policy = "deny-by-default"`, points
-   `vm.image` at the built image, mounts the host `claude` binary into the
-   VM at `/usr/local/bin/claude`, and disables the autoupdater via env var.
-5. **Adjust `$HOME` for exotic filesystems.** If the current directory's
+   `vm.image` at the built image, and disables the *background* autoupdater via
+   env var (`DISABLE_AUTOUPDATER=1` does not affect the explicit `claude update`
+   the wrapper runs). The `claude-code` preset already allows
+   `downloads.claude.ai:443`, which is where install/update fetch from, so the
+   startup update works under the deny-by-default policy.
+4. **Adjust `$HOME` for exotic filesystems.** If the current directory's
    filesystem root isn't `/` or `/home` (e.g. an overlay or network mount),
    `HOME` is redirected to that mount root before launching.
-6. **Launch.** Runs `airlock start --monitor -- claude --dangerously-skip-permissions --remote-control`,
+5. **Launch.** Runs `airlock start --monitor -- claude --dangerously-skip-permissions --remote-control`,
    handing control to the `airlock` CLI (an external tool, not part of this
    repo) which starts the VM and execs Claude Code inside it.
 
 ## Working on this script
 
 - There is no build, lint, or test command — validate changes by running
-  `./airlock-claude` directly. This requires `docker` or `podman`, the
-  `airlock` CLI, and `claude` all present in `PATH`.
+  `./airlock-claude` directly. This requires `docker` or `podman` and the
+  `airlock` CLI in `PATH` (a host `claude` is no longer needed). To iterate on
+  the image without launching a session, extract the Dockerfile heredoc, build
+  it by hand, and probe it with `docker run --rm ... claude --version`; check
+  the non-root case too (`--user 1000:1000 -e HOME=/tmp/uhome`), since the VM
+  user isn't guaranteed to be root. To re-test the build itself, delete the
+  image first (`docker rmi airlock-claude:latest`) — the script only builds
+  when it's missing.
 - `airlock.local.toml` and `.airlock/` are runtime artifacts produced by
   running the script / by `airlock` itself — don't hand-edit
   `airlock.local.toml` as a source file; it's regenerated (clobbered) on
