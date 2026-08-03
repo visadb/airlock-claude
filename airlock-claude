@@ -55,7 +55,10 @@ pick_container_engine() {
     OCI=docker
   elif command -v podman >/dev/null 2>&1; then
     OCI=podman
-    SHIM_DIR=$(mktemp -d) || exit 1
+    # Bare `mktemp -d` is a GNU convenience; BSD mktemp, which is what macOS
+    # ships, wants an explicit template. Same GNU/BSD split as gdf/df below,
+    # and this path is the one a Mac reaches — podman is the usual engine there.
+    SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/airlock-claude.XXXXXX") || exit 1
     trap 'rm -rf "$SHIM_DIR"' EXIT
     printf '#!/bin/sh\nexec podman "$@"\n' > "$SHIM_DIR/docker"
     chmod +x "$SHIM_DIR/docker"
