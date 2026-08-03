@@ -82,11 +82,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git curl ripgrep jq less procps unzip openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
-# Claude Code is installed into the image rather than bind-mounted from the
-# host: the host binary is built for the host OS, so a macOS `claude` cannot
-# run inside the Linux VM. It goes under a fixed HOME so the launcher path
-# doesn't depend on which user the VM ends up running as, and is left
-# world-writable so a non-root VM user can still update it.
+# Installed under a fixed HOME so the launcher path doesn't depend on which
+# user the VM ends up running as, and left world-writable so a non-root VM
+# user can still update it.
 ENV CLAUDE_INSTALL_HOME=/opt/claude
 # Appended, not prepended: /usr/local/bin stays ahead so `claude` resolves to
 # the self-updating wrapper below, but the install dir being on PATH at all
@@ -100,8 +98,8 @@ RUN mkdir -p "$CLAUDE_INSTALL_HOME" \
 # new Claude Code release doesn't need an image rebuild. The update endpoint
 # (downloads.claude.ai) is already allowed by airlock's claude-code preset.
 # HOME is overridden for the update only, so the updater resolves the image's
-# install instead of the VM user's home; the session itself keeps the real HOME
-# (that's where airlock mounts ~/.claude and ~/.claude.json).
+# install instead of the VM user's home; the session itself keeps the real HOME,
+# which is where its own config and credentials live.
 RUN printf '%s\n' \
       '#!/bin/sh' \
       'LAUNCHER="${CLAUDE_INSTALL_HOME:-/opt/claude}/.local/bin/claude"' \
@@ -119,7 +117,7 @@ RUN printf '%s\n' \
 
 # The host's git identity, captured at build time. Written to /etc/gitconfig
 # (git's system-level config) rather than a home directory, so it applies
-# whichever user the VM runs as; a real ~/.gitconfig in the mounted home still
+# whichever user the VM runs as; a real ~/.gitconfig in the VM's home still
 # takes precedence. Kept last so changing identity doesn't invalidate the
 # cached layers above. `git config` handles quoting, so odd characters in a
 # name are safe. Either value may be empty if the host has no identity set.
