@@ -1,0 +1,355 @@
+#!/bin/bash
+#
+# Test suite for airlock-claude.
+#
+# Runs the real script against stub docker/podman/airlock/df/git binaries, so
+# no case builds an image, starts a VM, or reaches the network. PATH is rebuilt
+# from scratch for every case — stubs plus a symlink directory of the handful of
+# real tools the script needs — so a docker or airlock installed on the host
+# can't leak in and quietly turn a stub assertion into a real invocation.
+#
+# Each case runs in its own temp working directory. The script writes
+# airlock.local.toml into the current directory and `rm -rf .airlock` under -r,
+# so running it in the repo would clobber files; cases must never cd here.
+#
+# Usage: ./test-airlock-claude [-v]
+#   -v   also print each case's captured stdout/stderr
+
+set -u
+
+VERBOSE=
+[ "${1:-}" = "-v" ] && VERBOSE=1
+
+SUITE_DIR=$(cd "$(dirname "$0")" && pwd)
+SCRIPT=$SUITE_DIR/airlock-claude
+[ -x "$SCRIPT" ] || { echo "not executable: $SCRIPT" >&2; exit 1; }
+
+TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/airlock-claude-tests.XXXXXX") || exit 1
+trap 'rm -rf "$TMPROOT"' EXIT
+
+PASSED=0
+FAILED=0
+
+pass() { PASSED=$((PASSED + 1)); printf '  ok    %s\n' "$1"; }
+fail() {
+  FAILED=$((FAILED + 1))
+  printf '  FAIL  %s\n' "$1"
+  [ -n "${2:-}" ] && printf '        %s\n' "$2"
+  return 0
+}
+
+section() { printf '\n%s\n' "$1"; }
+
+assert_rc() { # expected actual label
+  if [ "$1" = "$2" ]; then pass "$3"; else fail "$3" "expected exit $1, got $2"; fi
+}
+assert_eq() { # expected actual label
+  if [ "$1" = "$2" ]; then pass "$3"; else fail "$3" "expected [$1], got [$2]"; fi
+}
+assert_grep() { # pattern file label
+  if [ -f "$2" ] && grep -q -- "$1" "$2"; then pass "$3"
+  else fail "$3" "no match for [$1] in $(basename "$2")"; fi
+}
+# Fails on a missing file rather than passing: an absent-by-typo path would
+# otherwise satisfy every "should not contain" assertion in the suite.
+assert_not_grep() { # pattern file label
+  if [ ! -f "$2" ]; then fail "$3" "file to search does not exist: $2"
+  elif grep -q -- "$1" "$2"; then fail "$3" "unexpected match for [$1]"
+  else pass "$3"; fi
+}
+assert_exists() { if [ -e "$1" ]; then pass "$2"; else fail "$2" "missing: $1"; fi; }
+assert_absent() { if [ -e "$1" ]; then fail "$2" "should not exist: $1"; else pass "$2"; fi; }
+
+# ---------------------------------------------------------------------------
+# Hermetic PATH: the real tools the script shells out to, and nothing else.
+# df is deliberately excluded so a case can withhold it; the df stub supplies it.
+# ---------------------------------------------------------------------------
+TOOLS=$TMPROOT/tools
+mkdir -p "$TOOLS"
+for t in sed tail cat rm chmod mkdir ls; do
+  p=$(command -v "$t") || { echo "required tool not found: $t" >&2; exit 1; }
+  ln -s "$p" "$TOOLS/$t"
+done
+# mktemp is needed by the podman path inside the script under test.
+p=$(command -v mktemp) && ln -s "$p" "$TOOLS/mktemp"
+
+# ---------------------------------------------------------------------------
+# Per-case sandbox and stubs. Stubs read their behavior from exported env vars
+# so they can be written once, as literal heredocs, and varied per case.
+# ---------------------------------------------------------------------------
+new_case() {
+  CASE_DIR=$(mktemp -d "$TMPROOT/case.XXXXXX")
+  BIN=$CASE_DIR/bin
+  WORK=$CASE_DIR/work
+  FAKE_HOME=$CASE_DIR/home
+  LOG=$CASE_DIR/log
+  mkdir -p "$BIN" "$WORK" "$FAKE_HOME"
+  : > "$LOG"
+  export LOG CASE_DIR
+  export STUB_IMAGE_RC=0 STUB_BUILD_RC=0 DF_MODE=root PROBE_DOCKER=
+  unset AIRLOCK_CLAUDE_SKIP_UPDATE
+  RC=0
+}
+
+stub_engine() { # $1 = docker | podman
+  cat > "$BIN/$1" <<EOF
+#!/bin/sh
+NAME=$1
+EOF
+  cat >> "$BIN/$1" <<'EOF'
+case "$1" in
+  image) exit ${STUB_IMAGE_RC:-0} ;;
+  build)
+    echo "BUILD($NAME): $*" >> "$LOG"
+    cat > "$CASE_DIR/Dockerfile"
+    exit ${STUB_BUILD_RC:-0} ;;
+esac
+echo "$NAME REACHED: $*" >> "$LOG"
+exit 0
+EOF
+  chmod +x "$BIN/$1"
+}
+
+stub_airlock() {
+  cat > "$BIN/airlock" <<'EOF'
+#!/bin/sh
+echo "LAUNCH: $*" >> "$LOG"
+echo "LAUNCH_HOME: $HOME" >> "$LOG"
+if [ -n "${PROBE_DOCKER:-}" ]; then
+  echo "SHIM_PATH: $(command -v docker)" >> "$LOG"
+  docker probe-from-airlock
+fi
+exit 0
+EOF
+  chmod +x "$BIN/airlock"
+}
+
+stub_df() {
+  cat > "$BIN/df" <<'EOF'
+#!/bin/sh
+case "${DF_MODE:-root}" in
+  root)   printf 'Mounted on\n/\n' ;;
+  exotic) printf 'Mounted on\n/mnt/data\n' ;;
+  bsd)    echo "df: unrecognized option '--output=target'" >&2; exit 1 ;;
+  header) printf 'Mounted on\n' ;;
+esac
+exit 0
+EOF
+  chmod +x "$BIN/df"
+}
+
+# Two user.name/user.email pairs: `git config --list` prints in increasing
+# precedence order, so the script must take the LAST of each.
+stub_git() {
+  cat > "$BIN/git" <<'EOF'
+#!/bin/sh
+if [ "$1" = config ] && [ "$2" = --list ]; then
+  printf 'user.name=Global Name\n'
+  printf 'user.email=global@example.com\n'
+  printf 'user.name=Repo Name\n'
+  printf 'user.email=repo@example.com\n'
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$BIN/git"
+}
+
+# The usual arrangement: docker, airlock, df and git all present and working.
+stub_all() { stub_engine docker; stub_airlock; stub_df; stub_git; }
+
+run_script() {
+  ( cd "$WORK" && PATH="$BIN:$TOOLS" HOME="$FAKE_HOME" \
+      "$SCRIPT" "$@" > "$CASE_DIR/out" 2> "$CASE_DIR/err" )
+  RC=$?
+  if [ -n "$VERBOSE" ]; then
+    [ -s "$CASE_DIR/out" ] && sed 's/^/        out: /' "$CASE_DIR/out"
+    [ -s "$CASE_DIR/err" ] && sed 's/^/        err: /' "$CASE_DIR/err"
+  fi
+  return 0
+}
+
+CONFIG() { echo "$WORK/airlock.local.toml"; }
+
+# ---------------------------------------------------------------------------
+
+section "syntax"
+if bash -n "$SCRIPT" 2>"$TMPROOT/syntax.err"; then
+  pass "script parses under bash -n"
+else
+  fail "script parses under bash -n" "$(cat "$TMPROOT/syntax.err")"
+fi
+
+section "argument handling"
+new_case; stub_all
+run_script --help
+assert_rc 0 "$RC" "--help exits 0"
+assert_grep "Usage: airlock-claude" "$CASE_DIR/out" "--help prints usage to stdout"
+assert_not_grep "LAUNCH:" "$LOG" "--help does not launch"
+
+new_case; stub_all
+run_script -h
+assert_rc 0 "$RC" "-h exits 0"
+
+# --help must work on a machine that has no airlock at all: the dependency
+# check runs after parse_args precisely so this keeps working.
+new_case; stub_engine docker; stub_df; stub_git
+run_script --help
+assert_rc 0 "$RC" "--help works with airlock absent"
+
+new_case; stub_all
+run_script --bogus
+assert_rc 2 "$RC" "unknown option exits 2"
+assert_grep "unknown option" "$CASE_DIR/err" "unknown option explains itself"
+
+section "dependency checks"
+new_case; stub_engine docker; stub_df; stub_git   # no airlock stub
+export STUB_IMAGE_RC=1                            # image missing: build would run
+run_script
+assert_rc 1 "$RC" "missing airlock exits 1"
+assert_grep "airlock not found in PATH" "$CASE_DIR/err" "missing airlock names the dependency"
+assert_not_grep "BUILD(" "$LOG" "missing airlock is caught before the build"
+assert_absent "$(CONFIG)" "missing airlock writes no config"
+
+new_case; stub_airlock; stub_df; stub_git         # no docker, no podman
+run_script
+assert_rc 1 "$RC" "no container engine exits 1"
+assert_grep "Neither docker nor podman" "$CASE_DIR/err" "no engine names the dependency"
+
+new_case; stub_engine docker; stub_airlock; stub_git   # no df, and TOOLS has none
+run_script
+assert_rc 1 "$RC" "no df and no gdf exits 1"
+assert_grep "Neither gdf nor df" "$CASE_DIR/err" "no df names the dependency"
+
+section "generated config"
+new_case; stub_all
+run_script
+assert_rc 0 "$RC" "happy path exits 0"
+assert_exists "$(CONFIG)" "config is written"
+assert_grep 'presets = \["claude-code"\]' "$(CONFIG)" "config declares the claude-code preset"
+assert_grep 'policy = "deny-by-default"' "$(CONFIG)" "config denies network by default"
+assert_grep 'name = "airlock-claude:latest"' "$(CONFIG)" "config points at the built image"
+assert_grep 'DISABLE_AUTOUPDATER = "1"' "$(CONFIG)" "config disables the background autoupdater"
+assert_not_grep "AIRLOCK_CLAUDE_SKIP_UPDATE" "$(CONFIG)" "opt-out absent when unset on the host"
+
+# The opt-out must land inside [env]; airlock only forwards what that table
+# names, so a key that drifts into another table stops working silently.
+new_case; stub_all
+export AIRLOCK_CLAUDE_SKIP_UPDATE=1
+run_script
+assert_grep "AIRLOCK_CLAUDE_SKIP_UPDATE" "$(CONFIG)" "opt-out present when set on the host"
+sed -n '/^\[env\]/,$p' "$(CONFIG)" > "$CASE_DIR/env-table"
+assert_grep "AIRLOCK_CLAUDE_SKIP_UPDATE" "$CASE_DIR/env-table" "opt-out sits inside the [env] table"
+
+# A config that cannot be written must not fall through to the launch, or the
+# session comes up on a stale file or on airlock's own defaults.
+new_case; stub_all
+mkdir -p "$WORK/airlock.local.toml"
+run_script
+assert_rc 1 "$RC" "unwritable config exits 1"
+assert_grep "could not write airlock.local.toml" "$CASE_DIR/err" "unwritable config says so"
+assert_not_grep "LAUNCH:" "$LOG" "unwritable config does not launch"
+
+section "launch"
+new_case; stub_all
+run_script
+assert_eq "LAUNCH: start --monitor -- claude --dangerously-skip-permissions --remote-control" \
+  "$(grep '^LAUNCH:' "$LOG")" "launch argv is exact"
+
+section "image build"
+new_case; stub_all                                 # image already present
+run_script
+assert_not_grep "BUILD(" "$LOG" "existing image is not rebuilt"
+
+new_case; stub_all
+export STUB_IMAGE_RC=1                             # image missing
+run_script
+assert_grep "BUILD(docker)" "$LOG" "missing image triggers a build"
+assert_not_grep "no-cache" "$LOG" "implicit build keeps the layer cache"
+
+new_case; stub_all
+run_script -r
+assert_grep "no-cache" "$LOG" "-r discards the layer cache"
+assert_grep "pull" "$LOG" "-r re-pulls the base image"
+
+new_case; stub_all
+export STUB_IMAGE_RC=1 STUB_BUILD_RC=1             # build fails
+run_script
+assert_rc 1 "$RC" "failed build exits 1"
+assert_not_grep "LAUNCH:" "$LOG" "failed build does not launch"
+
+# The host's effective identity is the LAST of each key, not the first.
+new_case; stub_all
+export STUB_IMAGE_RC=1
+run_script
+assert_grep "GIT_USER_NAME=Repo Name" "$LOG" "build takes the last user.name"
+assert_grep "GIT_USER_EMAIL=repo@example.com" "$LOG" "build takes the last user.email"
+
+section "generated Dockerfile"
+new_case; stub_all
+export STUB_IMAGE_RC=1
+run_script
+assert_exists "$CASE_DIR/Dockerfile" "Dockerfile reaches the build on stdin"
+assert_eq "FROM python:3.14-slim" "$(head -1 "$CASE_DIR/Dockerfile")" "Dockerfile starts at the base image"
+assert_grep "claude.ai/install.sh" "$CASE_DIR/Dockerfile" "Dockerfile installs Claude Code"
+assert_grep "usr/local/bin/claude" "$CASE_DIR/Dockerfile" "Dockerfile writes the updating wrapper"
+assert_eq "$(grep -n 'ARG GIT_USER_NAME' "$CASE_DIR/Dockerfile" | cut -d: -f1)" \
+  "$(awk '/^ARG GIT_USER_NAME/{print NR}' "$CASE_DIR/Dockerfile")" "ARG pair is locatable"
+install_line=$(awk '/claude.ai\/install.sh/{print NR; exit}' "$CASE_DIR/Dockerfile")
+arg_line=$(awk '/^ARG GIT_USER_NAME/{print NR; exit}' "$CASE_DIR/Dockerfile")
+if [ "$arg_line" -gt "$install_line" ]; then
+  pass "git identity stays below the cached install layer"
+else
+  fail "git identity stays below the cached install layer" "ARG at $arg_line, install at $install_line"
+fi
+
+section "vm cache handling"
+new_case; stub_all
+mkdir -p "$WORK/.airlock"; : > "$WORK/.airlock/disk"
+run_script
+assert_exists "$WORK/.airlock/disk" "a plain run keeps the cached VM disk"
+
+new_case; stub_all
+mkdir -p "$WORK/.airlock"; : > "$WORK/.airlock/disk"
+run_script -r
+assert_absent "$WORK/.airlock" "-r drops the cached VM disk"
+
+section "podman fallback"
+new_case; stub_engine podman; stub_airlock; stub_df; stub_git   # no docker
+export PROBE_DOCKER=1
+run_script
+assert_rc 0 "$RC" "podman-only host launches"
+assert_grep "podman REACHED: probe-from-airlock" "$LOG" "shimmed docker forwards to podman"
+shim=$(sed -n 's/^SHIM_PATH: //p' "$LOG")
+case $shim in
+  */airlock-claude.*/docker) pass "shim uses an explicit mktemp template" ;;
+  *) fail "shim uses an explicit mktemp template" "shim path was [$shim]" ;;
+esac
+assert_absent "$(dirname "$shim")" "shim directory is removed on exit"
+
+section "HOME placement"
+new_case; stub_all                                  # filesystem root is /
+run_script
+assert_eq "LAUNCH_HOME: $FAKE_HOME" "$(grep '^LAUNCH_HOME:' "$LOG")" "HOME untouched on a plain root"
+
+new_case; stub_all
+export DF_MODE=exotic                               # separate filesystem
+run_script
+assert_eq "LAUNCH_HOME: /mnt/data" "$(grep '^LAUNCH_HOME:' "$LOG")" "HOME follows the working filesystem"
+
+new_case; stub_all
+export DF_MODE=bsd                                  # BSD df rejects --output
+run_script
+assert_eq "LAUNCH_HOME: $FAKE_HOME" "$(grep '^LAUNCH_HOME:' "$LOG")" "BSD df leaves HOME alone"
+
+new_case; stub_all
+export DF_MODE=header                               # header only, no target
+run_script
+assert_eq "LAUNCH_HOME: $FAKE_HOME" "$(grep '^LAUNCH_HOME:' "$LOG")" "empty df answer leaves HOME alone"
+
+# ---------------------------------------------------------------------------
+
+printf '\n%s\n' "----------------------------------------"
+printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
+[ "$FAILED" -eq 0 ] || exit 1
+exit 0

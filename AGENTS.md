@@ -9,8 +9,9 @@ Claude Code sandboxed inside an `airlock` VM in *any* directory with zero
 manual setup — no per-project image, no hand-written `airlock` config. Run
 from a directory, the script builds what it needs, generates config on the
 fly, and launches Claude Code with network access denied by default. The
-entire repo is this one bash script — there is no build system, package
-manifest, or test suite.
+shipped artifact is that one bash script — there is no build system and no
+package manifest. `test-airlock-claude` sits alongside it as a test suite but
+is not part of what you drop on `PATH`.
 
 The script is heavily commented, and those comments are the primary
 explanation of *why* each piece is the way it is. Read it before editing;
@@ -74,9 +75,17 @@ Things that aren't visible from the script or its comments:
 
 ## Working on this script
 
-- There is no build, lint, or test command — validate changes by running
-  `./airlock-claude` directly. This requires `docker` or `podman` and the
-  `airlock` CLI in `PATH` (a host `claude` is no longer needed).
+- Run `./test-airlock-claude` after any change. It drives the real script
+  against stub `docker`/`podman`/`airlock`/`df`/`git` binaries on a PATH built
+  from scratch, so it needs no container engine, no `airlock`, and no network,
+  and finishes in about a second. `-v` echoes each case's captured output.
+  Exit status is the result; add cases in the same shape when you add behavior.
+- What the suite cannot reach: anything that requires actually building the
+  image or booting a VM. The Dockerfile is only checked as *text* (it reaches
+  the build on stdin, starts at the right base, keeps the `ARG` pair below the
+  install layer) — nothing verifies it builds, that the wrapper updates, or
+  that airlock accepts the generated config. For those, run `./airlock-claude`
+  directly on a machine with `docker` or `podman` and the `airlock` CLI.
 - To iterate on the image without launching a session, extract the Dockerfile
   heredoc, build it by hand, and probe it with
   `docker run --rm ... claude --version`. Check the non-root case too
