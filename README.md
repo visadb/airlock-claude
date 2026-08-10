@@ -43,6 +43,21 @@ just to pick up a new release. Set `AIRLOCK_CLAUDE_SKIP_UPDATE=1` to skip the
 check; if it fails (no network, say), the session simply starts on the version
 already in the image.
 
+### The monitor TUI
+
+`airlock` can wrap the session in a monitor TUI that shows the network policy
+at work. It's off here, because it reads the host terminal itself and forwards
+only key events: the mouse-reporting sequences Claude Code enables on the
+alternate screen never reach the VM, so the session can't be scrolled or
+clicked. The same goes for any full-screen program you start inside the
+sandbox — `nvim` loses `set mouse=a` under the monitor too.
+
+When you want it anyway:
+
+```sh
+airlock-claude -m        # or --monitor
+```
+
 ### Rebuilding the image
 
 To rebuild the sandbox image from scratch — to pick up newer base packages, or
@@ -85,7 +100,7 @@ a plain run only builds when the image is missing.
    directory's filesystem root is something other than `/` or `/home`, `HOME`
    is repointed at that root, putting it on the same filesystem as the state
    being linked into.
-5. **Launch** — runs `airlock start --monitor -- claude --dangerously-skip-permissions --remote-control`,
+5. **Launch** — runs `airlock start -- claude --dangerously-skip-permissions --remote-control`,
    handing off to `airlock` to start the VM and run Claude Code inside it.
 
 `airlock.local.toml` is regenerated (overwritten) on every run and is not
