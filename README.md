@@ -45,17 +45,17 @@ already in the image.
 
 ### The monitor TUI
 
-`airlock` can wrap the session in a monitor TUI that shows the network policy
-at work. It's off here, because it reads the host terminal itself and forwards
-only key events: the mouse-reporting sequences Claude Code enables on the
-alternate screen never reach the VM, so the session can't be scrolled or
-clicked. The same goes for any full-screen program you start inside the
-sandbox — `nvim` loses `set mouse=a` under the monitor too.
+`airlock` wraps the session in a monitor TUI that shows the network policy at
+work. That costs the session its mouse: the monitor reads the host terminal
+itself and forwards only key events, so the mouse-reporting sequences Claude
+Code enables on the alternate screen never reach the VM, and the session can't
+be scrolled or clicked. The same goes for any full-screen program you start
+inside the sandbox — `nvim` loses `set mouse=a` under the monitor too.
 
-When you want it anyway:
+When you'd rather have the mouse:
 
 ```sh
-airlock-claude -m        # or --monitor
+airlock-claude -M        # or --no-monitor
 ```
 
 ### Rebuilding the image
@@ -100,8 +100,9 @@ a plain run only builds when the image is missing.
    directory's filesystem root is something other than `/` or `/home`, `HOME`
    is repointed at that root, putting it on the same filesystem as the state
    being linked into.
-5. **Launch** — runs `airlock start -- claude --dangerously-skip-permissions --remote-control`,
-   handing off to `airlock` to start the VM and run Claude Code inside it.
+5. **Launch** — runs `airlock start --monitor -- claude --dangerously-skip-permissions --remote-control`
+   (without `--monitor` under `-M`), handing off to `airlock` to start the VM
+   and run Claude Code inside it.
 
 `airlock.local.toml` is regenerated (overwritten) on every run and is not
 meant to be hand-edited or committed. `airlock` keeps the VM disk it converts

@@ -4,14 +4,17 @@ IMAGE=airlock-claude:latest
 
 usage() {
   cat <<'USAGE'
-Usage: airlock-claude [-m|--monitor] [-r|--rebuild-image] [-h|--help]
+Usage: airlock-claude [-M|--no-monitor] [-r|--rebuild-image] [-h|--help]
 
 Runs Claude Code sandboxed in an airlock VM in the current directory,
 building the sandbox image and generating airlock config as needed.
 
-  -m, --monitor        Run under airlock's monitor TUI. Costs the session its
-                       mouse: the monitor forwards keys only, so scrolling and
-                       clicking stop reaching Claude Code.
+The session runs under airlock's monitor TUI by default.
+
+  -M, --no-monitor     Run without the monitor TUI. Gives the session its
+                       mouse back: the monitor forwards keys only, so under it
+                       scrolling and clicking don't reach Claude Code.
+  -m, --monitor        Run under the monitor TUI (the default).
   -r, --rebuild-image  Rebuild the sandbox image from scratch, ignoring the
                        layer cache and re-pulling the base image, and drop
                        the local .airlock directory so airlock converts the
@@ -24,10 +27,11 @@ USAGE
 # line. Nothing is forwarded to claude — its own argv at the bottom is fixed.
 parse_args() {
   REBUILD=
-  MONITOR=
+  MONITOR=1
   while [[ $# -gt 0 ]]; do
     case $1 in
       -m|--monitor) MONITOR=1 ;;
+      -M|--no-monitor) MONITOR= ;;
       -r|--rebuild-image) REBUILD=1 ;;
       -h|--help) usage; exit 0 ;;
       *)
@@ -225,5 +229,5 @@ keep_home_on_working_filesystem
 # The monitor TUI sits between the host terminal and the VM's pty, and forwards
 # key events only — the mouse-reporting sequences Claude Code enables on the
 # alternate screen never make the trip, so the session can't be scrolled. Worth
-# it to watch the network policy work, but not by default.
+# that to watch the network policy work; --no-monitor buys the mouse back.
 airlock start ${MONITOR:+--monitor} -- claude --dangerously-skip-permissions --remote-control
