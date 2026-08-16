@@ -253,24 +253,44 @@ assert_not_grep "LAUNCH:" "$LOG" "unwritable config does not launch"
 section "launch"
 new_case; stub_all
 run_script
-assert_eq "LAUNCH: start --monitor -- claude --dangerously-skip-permissions --remote-control" \
+assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude --dangerously-skip-permissions --remote-control" \
   "$(grep '^LAUNCH:' "$LOG")" "launch argv is exact"
 
 new_case; stub_all
 run_script --monitor
 assert_grep "LAUNCH: start --monitor --" "$LOG" "--monitor asks for what is already the default"
 
-# The monitor costs the session its mouse: airlock's monitor TUI reads host
-# stdin and forwards keys only, so the mouse-reporting sequences a full-screen
-# Claude Code asks for never reach the VM. --no-monitor is the way out.
+# --no-monitor drops the flag entirely rather than passing a negated one, so
+# airlock hands the host terminal straight to the session.
 new_case; stub_all
 run_script --no-monitor
-assert_eq "LAUNCH: start -- claude --dangerously-skip-permissions --remote-control" \
+assert_eq "LAUNCH: start -- tmux -u new-session -A -s claude claude --dangerously-skip-permissions --remote-control" \
   "$(grep '^LAUNCH:' "$LOG")" "--no-monitor drops the monitor flag"
 
 new_case; stub_all
 run_script -M
 assert_not_grep "monitor" "$LOG" "-M is the short form"
+
+# The tmux wrapper is the same shape: an unquoted ${USE_TMUX:+...} that has to
+# vanish entirely under --no-tmux rather than leave an empty argument behind.
+new_case; stub_all
+run_script --tmux
+assert_grep "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude " "$LOG" \
+  "--tmux asks for what is already the default"
+
+new_case; stub_all
+run_script --no-tmux
+assert_eq "LAUNCH: start --monitor -- claude --dangerously-skip-permissions --remote-control" \
+  "$(grep '^LAUNCH:' "$LOG")" "--no-tmux runs claude directly"
+
+new_case; stub_all
+run_script -T
+assert_not_grep "tmux" "$LOG" "-T is the short form"
+
+new_case; stub_all
+run_script -M -T
+assert_eq "LAUNCH: start -- claude --dangerously-skip-permissions --remote-control" \
+  "$(grep '^LAUNCH:' "$LOG")" "-M and -T together strip both wrappers"
 
 section "image build"
 new_case; stub_all                                 # image already present
@@ -309,6 +329,23 @@ assert_exists "$CASE_DIR/Dockerfile" "Dockerfile reaches the build on stdin"
 assert_eq "FROM python:3.14-slim" "$(head -1 "$CASE_DIR/Dockerfile")" "Dockerfile starts at the base image"
 assert_grep "claude.ai/install.sh" "$CASE_DIR/Dockerfile" "Dockerfile installs Claude Code"
 assert_grep "usr/local/bin/claude" "$CASE_DIR/Dockerfile" "Dockerfile writes the updating wrapper"
+assert_grep "unzip openssh-client" "$CASE_DIR/Dockerfile" "Dockerfile keeps the base package list"
+assert_grep "^ *tmux locales \\\\$" "$CASE_DIR/Dockerfile" "Dockerfile installs tmux and locales, and nothing else"
+# ncurses-term wipes out ncurses-base's terminfo entries, xterm-256color
+# included, and tmux then refuses to start at all. tmux-256color, the only
+# reason to want it, is in ncurses-base already. Checked against the
+# comment-stripped file, since the Dockerfile names the package in the comment
+# that says never to install it.
+grep -v '^ *#' "$CASE_DIR/Dockerfile" > "$CASE_DIR/Dockerfile-uncommented"
+assert_not_grep "ncurses-term" "$CASE_DIR/Dockerfile-uncommented" "Dockerfile does not install ncurses-term"
+# Without a UTF-8 locale tmux rewrites everything passing through it into ACS
+# escapes, which the monitor renders as literal q and x. The locale LANG names
+# has to be generated too — unlike C.UTF-8, glibc does not carry it built in.
+assert_grep "^ENV LANG=en_US.UTF-8$" "$CASE_DIR/Dockerfile" "Dockerfile sets a UTF-8 locale"
+assert_grep "en_US.UTF-8 UTF-8' > /etc/locale.gen" "$CASE_DIR/Dockerfile" "Dockerfile seeds locale.gen with that locale"
+assert_grep "locale-gen" "$CASE_DIR/Dockerfile" "Dockerfile generates it"
+assert_grep "etc/tmux.conf" "$CASE_DIR/Dockerfile" "Dockerfile writes the system tmux config"
+assert_grep "set -g mouse on" "$CASE_DIR/Dockerfile" "system tmux config turns the mouse on"
 assert_eq "$(grep -n 'ARG GIT_USER_NAME' "$CASE_DIR/Dockerfile" | cut -d: -f1)" \
   "$(awk '/^ARG GIT_USER_NAME/{print NR}' "$CASE_DIR/Dockerfile")" "ARG pair is locatable"
 install_line=$(awk '/claude.ai\/install.sh/{print NR; exit}' "$CASE_DIR/Dockerfile")

@@ -24,7 +24,7 @@ run and called in that order at the bottom, so the call sequence at the end
 reads as a summary of the whole thing:
 
 ```
-parse_args              # -r/--rebuild-image and -h/--help; nothing is forwarded to claude
+parse_args              # -M/-T/-r/-h and their long forms; nothing is forwarded to claude
 require_airlock         # before the build, so -r can't spend minutes then fail at the last line
 pick_container_engine   # docker, else podman behind a `docker` shim
 build_image_if_needed   # airlock-claude:latest from an inline Dockerfile

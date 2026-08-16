@@ -4,17 +4,21 @@ IMAGE=airlock-claude:latest
 
 usage() {
   cat <<'USAGE'
-Usage: airlock-claude [-M|--no-monitor] [-r|--rebuild-image] [-h|--help]
+Usage: airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-r|--rebuild-image]
+                      [-h|--help]
 
 Runs Claude Code sandboxed in an airlock VM in the current directory,
 building the sandbox image and generating airlock config as needed.
 
-The session runs under airlock's monitor TUI by default.
+The session runs inside tmux, under airlock's monitor TUI, by default.
 
-  -M, --no-monitor     Run without the monitor TUI. Gives the session its
-                       mouse back: the monitor forwards keys only, so under it
-                       scrolling and clicking don't reach Claude Code.
+  -M, --no-monitor     Run without the monitor TUI, handing the host terminal
+                       straight to the session.
   -m, --monitor        Run under the monitor TUI (the default).
+  -T, --no-tmux        Run claude directly instead of inside tmux. Also the
+                       way out if the image predates tmux — rebuild with -r
+                       to get it.
+  -t, --tmux           Run inside tmux (the default).
   -r, --rebuild-image  Rebuild the sandbox image from scratch, ignoring the
                        layer cache and re-pulling the base image, and drop
                        the local .airlock directory so airlock converts the
@@ -23,15 +27,20 @@ The session runs under airlock's monitor TUI by default.
 USAGE
 }
 
-# Sets REBUILD for the two steps that consult it, and MONITOR for the launch
-# line. Nothing is forwarded to claude — its own argv at the bottom is fixed.
+# Sets REBUILD for the two steps that consult it, and MONITOR and USE_TMUX for
+# the launch line. Nothing is forwarded to claude — its own argv at the bottom
+# is fixed. USE_TMUX rather than TMUX: tmux sets TMUX itself to mark a shell as
+# being inside a session, and a variable of ours by that name reads as that one.
 parse_args() {
   REBUILD=
   MONITOR=1
+  USE_TMUX=1
   while [[ $# -gt 0 ]]; do
     case $1 in
       -m|--monitor) MONITOR=1 ;;
       -M|--no-monitor) MONITOR= ;;
+      -t|--tmux) USE_TMUX=1 ;;
+      -T|--no-tmux) USE_TMUX= ;;
       -r|--rebuild-image) REBUILD=1 ;;
       -h|--help) usage; exit 0 ;;
       *)
@@ -101,9 +110,33 @@ build_image_if_needed() {
     --build-arg "GIT_USER_NAME=$git_user_name" \
     --build-arg "GIT_USER_EMAIL=$git_user_email" - <<'DOCKERFILE' || exit 1
 FROM python:3.14-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# No ncurses-term here, deliberately. The tmux-256color entry /etc/tmux.conf
+# names below is already in ncurses-base, which the base image has — and
+# installing ncurses-term on top of it destroys ncurses-base's 44 entries,
+# xterm-256color among them, leaving `tmux` to die on "missing or unsuitable
+# terminal: xterm-256color" and the shell with no terminal type at all.
+# locales is here for the en_US.UTF-8 the ENV below names: glibc builds C.UTF-8
+# in, but a named locale has to be generated from the source files that package
+# carries. /etc/locale.gen is overwritten rather than appended to, so exactly
+# one locale is built. DEBIAN_FRONTEND is scoped to this command rather than
+# set as an ENV, so it doesn't follow the image into the session — locales is
+# the one package here that has anything to ask.
+RUN DEBIAN_FRONTEND=noninteractive apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates git curl ripgrep jq less procps unzip openssh-client \
+      tmux locales \
+ && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen \
+ && locale-gen \
  && rm -rf /var/lib/apt/lists/*
+
+# The base image sets no LANG at all, which leaves the VM in the POSIX locale
+# (`locale charmap` says ANSI_X3.4-1968). tmux reads LC_ALL/LC_CTYPE/LANG to
+# decide whether its terminal is UTF-8, and a non-UTF-8 tmux rewrites the
+# box-drawing characters passing through it into VT100 ACS escapes and mangles
+# anything multi-byte — so Claude Code's lines arrive as `q` and `x` and its
+# crab comes out broken. LANG rather than LC_ALL, so a session can still
+# override it; en_US.UTF-8 is generated in the layer above.
+ENV LANG=en_US.UTF-8
 
 # Installed under a fixed HOME so the launcher path doesn't depend on which
 # user the VM ends up running as, and left world-writable so a non-root VM
@@ -137,6 +170,30 @@ RUN printf '%s\n' \
       'exec "$LAUNCHER" "$@"' \
       > /usr/local/bin/claude \
  && chmod +x /usr/local/bin/claude
+
+# tmux's mouse config, written to /etc/tmux.conf — tmux's system-level config,
+# read before ~/.tmux.conf — rather than a home directory, so it applies
+# whichever user the VM runs as, the same reasoning as /etc/gitconfig below. A
+# real ~/.tmux.conf in the VM's home still takes precedence.
+#
+# `mouse on` is what gives tmux itself the mouse, and it does not take it away
+# from the session: tmux forwards events to any pane whose program has asked for
+# mouse reporting, so Claude Code and nvim keep theirs, and tmux only acts on
+# the events nobody else wanted. The terminal-features line is what makes
+# set-clipboard do anything — tmux emits OSC 52 only for terminals it believes
+# support it, and its built-in defaults cover little more than xterm*, which is
+# no help when the host terminal on the far side of the VM is unknown. Likewise
+# default-terminal: tmux would otherwise announce `screen` to its panes and cost
+# the session its colours the moment it started tmux. tmux-256color comes from
+# ncurses-base, so it needs nothing installed beyond tmux itself.
+RUN printf '%s\n' \
+      '# Applies to every user in this image; ~/.tmux.conf still wins.' \
+      'set -g mouse on' \
+      '# Copy out of the VM to the host clipboard, and let panes do the same.' \
+      'set -g set-clipboard on' \
+      'set -as terminal-features ",*:clipboard"' \
+      'set -g default-terminal "tmux-256color"' \
+      > /etc/tmux.conf
 
 # The host's git identity, captured at build time. Written to /etc/gitconfig
 # (git's system-level config) rather than a home directory, so it applies
@@ -226,8 +283,27 @@ drop_vm_cache_on_rebuild
 generate_airlock_config
 keep_home_on_working_filesystem
 
-# The monitor TUI sits between the host terminal and the VM's pty, and forwards
-# key events only — the mouse-reporting sequences Claude Code enables on the
-# alternate screen never make the trip, so the session can't be scrolled. Worth
-# that to watch the network policy work; --no-monitor buys the mouse back.
-airlock start ${MONITOR:+--monitor} -- claude --dangerously-skip-permissions --remote-control
+# The monitor TUI sits between the host terminal and the VM's pty, reading host
+# input itself and forwarding it on — mouse events included, as of current
+# airlock, so the session keeps its mouse (and so does tmux inside it) while the
+# network policy stays on screen. Older airlock forwarded keys only, which is
+# what --no-monitor used to be for.
+#
+# claude runs inside tmux, which is what makes a second pane or window
+# reachable from a session that would otherwise be a single full-screen
+# program. `new-session -A` attaches to a session named claude if one is
+# already there instead of starting a rival; when claude exits the session
+# ends, tmux exits, and the VM comes down exactly as it does without tmux.
+# Detaching (prefix+d) is the one asymmetry — it ends the tmux client, which
+# is the process airlock is waiting on, so it stops the VM rather than leaving
+# something to come back to. --no-tmux skips the wrapper; both expansions are
+# deliberately unquoted, so an empty one disappears rather than becoming an
+# empty argument.
+#
+# `tmux -u` forces UTF-8 output rather than leaving it to tmux's LANG check.
+# The image sets LANG=en_US.UTF-8 so that check should pass on its own; -u is
+# what actually fixed the rendering when it did not, and means a
+# session that loses LANG on the way into the VM degrades to nothing worse
+# than tmux drawing correctly, instead of ACS escapes the monitor renders as
+# `q` and `x`.
+airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} claude --dangerously-skip-permissions --remote-control
