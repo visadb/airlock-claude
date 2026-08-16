@@ -62,6 +62,16 @@ Things that aren't visible from the script or its comments:
   the image's wrapper runs at startup; that update reaches the network because
   the `claude-code` preset already allows `downloads.claude.ai:443` under the
   deny-by-default policy.
+- **The permission bypass is in the image, not on the launch line.** The last
+  line runs `claude` with no permission flag; what puts the session in
+  `bypassPermissions` mode is `/etc/claude-code/managed-settings.json`, written
+  by the Dockerfile. Same reasoning as `/etc/gitconfig` and `/etc/tmux.conf` —
+  it applies whichever user the VM runs as, and being outside `HOME` it isn't
+  displaced when `airlock` populates the VM's home from the host's — except
+  that managed settings are the *highest*-precedence source, so a host
+  `~/.claude/settings.json` can't override it. The consequence for the launcher
+  is that an image built before this existed starts with prompts on, and `-r`
+  is the fix.
 - **`airlock` forwards only the env vars the config names**, which is why a
   host `AIRLOCK_CLAUDE_SKIP_UPDATE` has to be written into `[env]` to reach the
   VM at all.

@@ -31,11 +31,18 @@ after that reuses it.
 Each invocation writes a fresh `airlock.local.toml` for the current directory
 and starts Claude Code inside an `airlock` VM.
 
-Claude Code runs with `--dangerously-skip-permissions`, which is the point of
-the exercise: the VM is the sandbox, so permission prompts aren't what's
-keeping the session contained. Network access is denied by default, apart from
-what `airlock`'s `claude-code` preset allows — enough for Claude Code to reach
-the API and its own update endpoint, and nothing else unless you say so.
+Claude Code runs in bypass-permissions mode, which is the point of the
+exercise: the VM is the sandbox, so permission prompts aren't what's keeping
+the session contained. That comes from the image rather than a command-line
+flag — `/etc/claude-code/managed-settings.json`, Claude Code's system-level
+settings file, sets `permissions.defaultMode` to `bypassPermissions` — so it
+holds for any `claude` started inside the VM, not just the one this script
+launches. Network access is denied by default, apart from what `airlock`'s
+`claude-code` preset allows — enough for Claude Code to reach the API and its
+own update endpoint, and nothing else unless you say so.
+
+An image built before that setting existed starts with prompts on instead;
+rebuild it with `-r`.
 
 ### Updates
 
@@ -164,8 +171,11 @@ a plain run only builds when the image is missing.
    is repointed at that root, putting it on the same filesystem as the state
    being linked into.
 5. **Launch** — runs
-   `airlock start --monitor -- tmux -u new-session -A -s claude claude --dangerously-skip-permissions --remote-control`,
+   `airlock start --monitor -- tmux -u new-session -A -s claude claude --remote-control`,
    handing off to `airlock` to start the VM and run Claude Code inside it.
+   No permission flag appears here: the image's
+   `/etc/claude-code/managed-settings.json` already puts the session in
+   bypass-permissions mode.
    `-M` drops `--monitor`; `-T` drops the `tmux` wrapper, leaving `claude`
    as the command `airlock` runs.
 

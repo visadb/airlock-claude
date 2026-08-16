@@ -171,6 +171,34 @@ RUN printf '%s\n' \
       > /usr/local/bin/claude \
  && chmod +x /usr/local/bin/claude
 
+# Permission prompts are turned off here rather than by passing
+# --dangerously-skip-permissions on the launch line. Bypassing them is the point
+# of the exercise either way — the VM is the sandbox, so the prompts aren't what
+# keeps the session contained — but a settings file survives being launched by
+# something other than this script, `claude` restarted from a shell inside the
+# session included.
+#
+# managed-settings.json is Claude Code's system-level settings file
+# (/etc/claude-code on Linux), chosen for the same reason as /etc/gitconfig and
+# /etc/tmux.conf below: it applies whichever user the VM runs as, and it sits
+# outside HOME, so airlock populating the VM's home from the host's can't
+# displace it. Unlike those two it is the *highest*-precedence source rather
+# than the lowest, so a host ~/.claude/settings.json can't quietly put the
+# prompts back; defaultMode only sets the mode the session starts in, which
+# shift+tab still cycles.
+#
+# skipDangerousModePermissionPrompt is the record of having accepted the bypass
+# warning dialog. Claude Code writes it into the user's settings once accepted,
+# so a host that has already done so carries it in; baking it in as well is
+# what keeps a VM whose home has never seen that dialog from stopping to ask.
+RUN mkdir -p /etc/claude-code \
+ && printf '%s\n' \
+      '{' \
+      '  "permissions": { "defaultMode": "bypassPermissions" },' \
+      '  "skipDangerousModePermissionPrompt": true' \
+      '}' \
+      > /etc/claude-code/managed-settings.json
+
 # tmux's mouse config, written to /etc/tmux.conf — tmux's system-level config,
 # read before ~/.tmux.conf — rather than a home directory, so it applies
 # whichever user the VM runs as, the same reasoning as /etc/gitconfig below. A
@@ -306,4 +334,8 @@ keep_home_on_working_filesystem
 # session that loses LANG on the way into the VM degrades to nothing worse
 # than tmux drawing correctly, instead of ACS escapes the monitor renders as
 # `q` and `x`.
-airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} claude --dangerously-skip-permissions --remote-control
+# claude is launched with no permission flag: the image's
+# /etc/claude-code/managed-settings.json puts the session in bypassPermissions
+# mode, so an image built before that setting existed starts with prompts on —
+# rebuild with -r to get them off again.
+airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} claude --remote-control
