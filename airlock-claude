@@ -27,10 +27,6 @@ The session runs inside tmux, under airlock's monitor TUI, by default.
 USAGE
 }
 
-# Sets REBUILD for the two steps that consult it, and MONITOR and USE_TMUX for
-# the launch line. Nothing is forwarded to claude — its own argv at the bottom
-# is fixed. USE_TMUX rather than TMUX: tmux sets TMUX itself to mark a shell as
-# being inside a session, and a variable of ours by that name reads as that one.
 parse_args() {
   REBUILD=
   MONITOR=1
@@ -52,10 +48,6 @@ parse_args() {
   done
 }
 
-# Checked here rather than left to the launch line: under -r the build spends
-# minutes on --no-cache --pull first, and failing after that hands the user
-# "line NNN: airlock: command not found" in exchange for the wait. Runs after
-# parse_args so --help still works without airlock installed.
 require_airlock() {
   if ! command -v airlock >/dev/null 2>&1; then
     echo "airlock not found in PATH" >&2
@@ -63,19 +55,11 @@ require_airlock() {
   fi
 }
 
-# Sets OCI, and on the podman path also SHIM_DIR and PATH. Those stay global:
-# the EXIT trap below fires long after this function has returned, and needs
-# SHIM_DIR still set to clean up.
 pick_container_engine() {
-  # airlock always shells out to a literal `docker` command, so when only podman
-  # is available it gets a shim that forwards to podman.
   if command -v docker >/dev/null 2>&1; then
     OCI=docker
   elif command -v podman >/dev/null 2>&1; then
     OCI=podman
-    # Bare `mktemp -d` is a GNU convenience; BSD mktemp, which is what macOS
-    # ships, wants an explicit template. Same GNU/BSD split as gdf/df below,
-    # and this path is the one a Mac reaches — podman is the usual engine there.
     SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/airlock-claude.XXXXXX") || exit 1
     trap 'rm -rf "$SHIM_DIR"' EXIT
     printf '#!/bin/sh\nexec podman "$@"\n' > "$SHIM_DIR/docker"
@@ -93,34 +77,16 @@ build_image_if_needed() {
   fi
 
   echo "Building $IMAGE with $OCI ..." >&2
-  # A cached rebuild would hand back the very same layers, so `-r` throws away
-  # the layer cache and re-pulls the base image — otherwise "rebuild" wouldn't
-  # pick up a new Claude Code install or newer apt packages.
   local build_flags=()
   [[ -n $REBUILD ]] && build_flags=(--no-cache --pull)
-  # Bake the host's git identity into the image so commits made inside the VM
-  # are attributed correctly. `git config --list --includes` prints entries in
-  # increasing precedence order, so the last occurrence of each key is the
-  # effective one. Either may be empty (no identity configured on the host).
-  local git_list git_user_name git_user_email
-  git_list=$(git config --list --includes 2>/dev/null)
-  git_user_name=$(printf '%s\n' "$git_list" | sed -n 's/^user\.name=//p' | tail -1)
-  git_user_email=$(printf '%s\n' "$git_list" | sed -n 's/^user\.email=//p' | tail -1)
+  local config_in_precedence_order git_user_name git_user_email
+  config_in_precedence_order=$(git config --list --includes 2>/dev/null)
+  git_user_name=$(printf '%s\n' "$config_in_precedence_order" | sed -n 's/^user\.name=//p' | tail -1)
+  git_user_email=$(printf '%s\n' "$config_in_precedence_order" | sed -n 's/^user\.email=//p' | tail -1)
   "$OCI" build -t "$IMAGE" "${build_flags[@]}" \
     --build-arg "GIT_USER_NAME=$git_user_name" \
     --build-arg "GIT_USER_EMAIL=$git_user_email" - <<'DOCKERFILE' || exit 1
 FROM python:3.14-slim
-# No ncurses-term here, deliberately. The tmux-256color entry /etc/tmux.conf
-# names below is already in ncurses-base, which the base image has — and
-# installing ncurses-term on top of it destroys ncurses-base's 44 entries,
-# xterm-256color among them, leaving `tmux` to die on "missing or unsuitable
-# terminal: xterm-256color" and the shell with no terminal type at all.
-# locales is here for the en_US.UTF-8 the ENV below names: glibc builds C.UTF-8
-# in, but a named locale has to be generated from the source files that package
-# carries. /etc/locale.gen is overwritten rather than appended to, so exactly
-# one locale is built. DEBIAN_FRONTEND is scoped to this command rather than
-# set as an ENV, so it doesn't follow the image into the session — locales is
-# the one package here that has anything to ask.
 RUN DEBIAN_FRONTEND=noninteractive apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates git curl ripgrep jq less procps unzip openssh-client \
@@ -129,41 +95,20 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update \
  && locale-gen \
  && rm -rf /var/lib/apt/lists/*
 
-# The base image sets no LANG at all, which leaves the VM in the POSIX locale
-# (`locale charmap` says ANSI_X3.4-1968). tmux reads LC_ALL/LC_CTYPE/LANG to
-# decide whether its terminal is UTF-8, and a non-UTF-8 tmux rewrites the
-# box-drawing characters passing through it into VT100 ACS escapes and mangles
-# anything multi-byte — so Claude Code's lines arrive as `q` and `x` and its
-# crab comes out broken. LANG rather than LC_ALL, so a session can still
-# override it; en_US.UTF-8 is generated in the layer above.
 ENV LANG=en_US.UTF-8
 
-# Installed under a fixed HOME so the launcher path doesn't depend on which
-# user the VM ends up running as, and left world-writable so a non-root VM
-# user can still update it.
 ENV CLAUDE_INSTALL_HOME=/opt/claude
-# Appended, not prepended: /usr/local/bin stays ahead so `claude` resolves to
-# the self-updating wrapper below, but the install dir being on PATH at all
-# stops Claude Code warning about it on every update.
 ENV PATH="$PATH:/opt/claude/.local/bin"
 RUN mkdir -p "$CLAUDE_INSTALL_HOME" \
  && HOME="$CLAUDE_INSTALL_HOME" sh -c 'curl -fsSL https://claude.ai/install.sh | bash' \
  && chmod -R a+rwX "$CLAUDE_INSTALL_HOME"
 
-# `claude` on PATH is a wrapper that updates in place before handing off, so a
-# new Claude Code release doesn't need an image rebuild. The update endpoint
-# (downloads.claude.ai) is already allowed by airlock's claude-code preset.
-# HOME is overridden for the update only, so the updater resolves the image's
-# install instead of the VM user's home; the session itself keeps the real HOME,
-# which is where its own config and credentials live.
 RUN printf '%s\n' \
       '#!/bin/sh' \
       'LAUNCHER="${CLAUDE_INSTALL_HOME:-/opt/claude}/.local/bin/claude"' \
-      'STAMP=/tmp/.airlock-claude-updated' \
-      '# Update once per VM boot: nested `claude` calls must not swap the' \
-      '# binary out from under a running session.' \
-      'if [ -z "$AIRLOCK_CLAUDE_SKIP_UPDATE" ] && [ ! -e "$STAMP" ]; then' \
-      '  : > "$STAMP" 2>/dev/null' \
+      'UPDATED_THIS_BOOT=/tmp/.airlock-claude-updated-this-boot' \
+      'if [ -z "$AIRLOCK_CLAUDE_SKIP_UPDATE" ] && [ ! -e "$UPDATED_THIS_BOOT" ]; then' \
+      '  : > "$UPDATED_THIS_BOOT" 2>/dev/null' \
       '  HOME="${CLAUDE_INSTALL_HOME:-/opt/claude}" "$LAUNCHER" update >&2 ||' \
       '    echo "airlock-claude: update failed, using the version from the image" >&2' \
       'fi' \
@@ -171,26 +116,6 @@ RUN printf '%s\n' \
       > /usr/local/bin/claude \
  && chmod +x /usr/local/bin/claude
 
-# Permission prompts are turned off here rather than by passing
-# --dangerously-skip-permissions on the launch line. Bypassing them is the point
-# of the exercise either way — the VM is the sandbox, so the prompts aren't what
-# keeps the session contained — but a settings file survives being launched by
-# something other than this script, `claude` restarted from a shell inside the
-# session included.
-#
-# managed-settings.json is Claude Code's system-level settings file
-# (/etc/claude-code on Linux), chosen for the same reason as /etc/gitconfig and
-# /etc/tmux.conf below: it applies whichever user the VM runs as, and it sits
-# outside HOME, so airlock populating the VM's home from the host's can't
-# displace it. Unlike those two it is the *highest*-precedence source rather
-# than the lowest, so a host ~/.claude/settings.json can't quietly put the
-# prompts back; defaultMode only sets the mode the session starts in, which
-# shift+tab still cycles.
-#
-# skipDangerousModePermissionPrompt is the record of having accepted the bypass
-# warning dialog. Claude Code writes it into the user's settings once accepted,
-# so a host that has already done so carries it in; baking it in as well is
-# what keeps a VM whose home has never seen that dialog from stopping to ask.
 RUN mkdir -p /etc/claude-code \
  && printf '%s\n' \
       '{' \
@@ -199,36 +124,13 @@ RUN mkdir -p /etc/claude-code \
       '}' \
       > /etc/claude-code/managed-settings.json
 
-# tmux's mouse config, written to /etc/tmux.conf — tmux's system-level config,
-# read before ~/.tmux.conf — rather than a home directory, so it applies
-# whichever user the VM runs as, the same reasoning as /etc/gitconfig below. A
-# real ~/.tmux.conf in the VM's home still takes precedence.
-#
-# `mouse on` is what gives tmux itself the mouse, and it does not take it away
-# from the session: tmux forwards events to any pane whose program has asked for
-# mouse reporting, so Claude Code and nvim keep theirs, and tmux only acts on
-# the events nobody else wanted. The terminal-features line is what makes
-# set-clipboard do anything — tmux emits OSC 52 only for terminals it believes
-# support it, and its built-in defaults cover little more than xterm*, which is
-# no help when the host terminal on the far side of the VM is unknown. Likewise
-# default-terminal: tmux would otherwise announce `screen` to its panes and cost
-# the session its colours the moment it started tmux. tmux-256color comes from
-# ncurses-base, so it needs nothing installed beyond tmux itself.
 RUN printf '%s\n' \
-      '# Applies to every user in this image; ~/.tmux.conf still wins.' \
       'set -g mouse on' \
-      '# Copy out of the VM to the host clipboard, and let panes do the same.' \
       'set -g set-clipboard on' \
       'set -as terminal-features ",*:clipboard"' \
       'set -g default-terminal "tmux-256color"' \
       > /etc/tmux.conf
 
-# The host's git identity, captured at build time. Written to /etc/gitconfig
-# (git's system-level config) rather than a home directory, so it applies
-# whichever user the VM runs as; a real ~/.gitconfig in the VM's home still
-# takes precedence. Kept last so changing identity doesn't invalidate the
-# cached layers above. `git config` handles quoting, so odd characters in a
-# name are safe. Either value may be empty if the host has no identity set.
 ARG GIT_USER_NAME=
 ARG GIT_USER_EMAIL=
 RUN if [ -n "$GIT_USER_NAME" ]; then git config --system user.name "$GIT_USER_NAME"; fi \
@@ -236,8 +138,6 @@ RUN if [ -n "$GIT_USER_NAME" ]; then git config --system user.name "$GIT_USER_NA
 DOCKERFILE
 }
 
-# airlock caches the VM disk it converts from the OCI image under .airlock, so
-# a freshly built image goes unused until that cache is gone.
 drop_vm_cache_on_rebuild() {
   if [[ -n $REBUILD ]]; then
     rm -rf .airlock
@@ -245,20 +145,11 @@ drop_vm_cache_on_rebuild() {
 }
 
 generate_airlock_config() {
-  # airlock only passes through what the config names, so the host's opt-out has
-  # to be written in to reach the VM. Built here and expanded inside [env] below
-  # rather than appended after the heredoc: an appended key joins whatever table
-  # ends up last, so adding a table below [env] would silently move it out and
-  # stop the opt-out working.
   local skip_update_line=
   if [[ -n ${AIRLOCK_CLAUDE_SKIP_UPDATE:-} ]]; then
     skip_update_line='AIRLOCK_CLAUDE_SKIP_UPDATE = "1"'
   fi
 
-  # A failed write must not fall through to the launch: airlock would start on
-  # whatever airlock.local.toml a previous run left in this directory, or on its
-  # own defaults, and the deny-by-default policy this script exists to impose
-  # would silently not be the one in effect.
   if ! cat > airlock.local.toml <<EOF
 presets = ["claude-code"]
 
@@ -270,8 +161,6 @@ name = "$IMAGE"
 resolution = "docker"
 
 [env]
-# The image's claude wrapper updates at startup, so the background autoupdater
-# would only duplicate that work mid-session.
 DISABLE_AUTOUPDATER = "1"
 $skip_update_line
 EOF
@@ -281,22 +170,12 @@ EOF
   fi
 }
 
-# airlock hardlinks files out of HOME into its per-directory state, and a
-# hardlink can't cross a filesystem boundary — including a btrfs subvolume
-# boundary, which is one filesystem to the mount table but not to link(2).
-# Pointing HOME at the filesystem root of the working directory puts it on the
-# same filesystem as the state being linked into, so the links can be made.
 keep_home_on_working_filesystem() {
   local df_bin fs_root
   df_bin="$(command -v gdf || command -v df)" || {
     echo "Neither gdf nor df found in PATH" >&2
     exit 1
   }
-  # `--output` is GNU-only — BSD df rejects it, so a Mac without coreutils' gdf
-  # gets no answer here. Requiring the result to look like an absolute path keeps
-  # that case a no-op: an unguarded assignment would export an empty HOME, which
-  # relocates HOME without putting it on the working filesystem — the failure
-  # this function exists to prevent, arrived at by a different route.
   fs_root=$("$df_bin" --output=target . 2>/dev/null | tail -1)
   if [[ $fs_root == /* && $fs_root != "/" && $fs_root != "/home" ]]; then
     export HOME=$fs_root
@@ -311,31 +190,4 @@ drop_vm_cache_on_rebuild
 generate_airlock_config
 keep_home_on_working_filesystem
 
-# The monitor TUI sits between the host terminal and the VM's pty, reading host
-# input itself and forwarding it on — mouse events included, as of current
-# airlock, so the session keeps its mouse (and so does tmux inside it) while the
-# network policy stays on screen. Older airlock forwarded keys only, which is
-# what --no-monitor used to be for.
-#
-# claude runs inside tmux, which is what makes a second pane or window
-# reachable from a session that would otherwise be a single full-screen
-# program. `new-session -A` attaches to a session named claude if one is
-# already there instead of starting a rival; when claude exits the session
-# ends, tmux exits, and the VM comes down exactly as it does without tmux.
-# Detaching (prefix+d) is the one asymmetry — it ends the tmux client, which
-# is the process airlock is waiting on, so it stops the VM rather than leaving
-# something to come back to. --no-tmux skips the wrapper; both expansions are
-# deliberately unquoted, so an empty one disappears rather than becoming an
-# empty argument.
-#
-# `tmux -u` forces UTF-8 output rather than leaving it to tmux's LANG check.
-# The image sets LANG=en_US.UTF-8 so that check should pass on its own; -u is
-# what actually fixed the rendering when it did not, and means a
-# session that loses LANG on the way into the VM degrades to nothing worse
-# than tmux drawing correctly, instead of ACS escapes the monitor renders as
-# `q` and `x`.
-# claude is launched with no permission flag: the image's
-# /etc/claude-code/managed-settings.json puts the session in bypassPermissions
-# mode, so an image built before that setting existed starts with prompts on —
-# rebuild with -r to get them off again.
 airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} claude --remote-control
