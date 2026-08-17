@@ -4,8 +4,8 @@ IMAGE=airlock-claude:latest
 
 usage() {
   cat <<'USAGE'
-Usage: airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-r|--rebuild-image]
-                      [-h|--help]
+Usage: airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-c|--remote-control]
+                      [-r|--rebuild-image] [-h|--help]
 
 Runs Claude Code sandboxed in an airlock VM in the current directory,
 building the sandbox image and generating airlock config as needed.
@@ -19,6 +19,12 @@ The session runs inside tmux, under airlock's monitor TUI, by default.
                        way out if the image predates tmux — rebuild with -r
                        to get it.
   -t, --tmux           Run inside tmux (the default).
+  -c, --remote-control Run claude with --remote-control. Turns off the
+                       preset's OAuth token injection and hides its
+                       placeholder token from the session, so claude asks
+                       for an interactive login instead — remote control
+                       doesn't work on an injected token. The login is
+                       saved under ~/.airlock/claude and reused next run.
   -r, --rebuild-image  Rebuild the sandbox image from scratch, ignoring the
                        layer cache and re-pulling the base image, and drop
                        the local .airlock directory so airlock converts the
@@ -28,13 +34,14 @@ USAGE
 }
 
 parse_args() {
-  local rebuild= monitor=1 use_tmux=1 show_usage=
+  local rebuild= monitor=1 use_tmux=1 remote_control= show_usage=
   while [[ $# -gt 0 ]]; do
     case $1 in
       -m|--monitor) monitor=1 ;;
       -M|--no-monitor) monitor= ;;
       -t|--tmux) use_tmux=1 ;;
       -T|--no-tmux) use_tmux= ;;
+      -c|--remote-control) remote_control=1 ;;
       -r|--rebuild-image) rebuild=1 ;;
       -h|--help) show_usage=1; break ;;
       *)
@@ -44,7 +51,7 @@ parse_args() {
     esac
     shift
   done
-  printf '%s:%s:%s:%s\n' "$rebuild" "$monitor" "$use_tmux" "$show_usage"
+  printf '%s:%s:%s:%s:%s\n' "$rebuild" "$monitor" "$use_tmux" "$remote_control" "$show_usage"
 }
 
 require_airlock() {
@@ -150,10 +157,15 @@ drop_vm_cache_on_rebuild() {
 }
 
 generate_airlock_config() {
-  local skip_update=$1
+  local skip_update=$1 remote_control=$2
   local skip_update_line=
   if [[ -n $skip_update ]]; then
     skip_update_line='AIRLOCK_CLAUDE_SKIP_UPDATE = "1"'
+  fi
+  local token_middleware_override=
+  if [[ -n $remote_control ]]; then
+    token_middleware_override='[network.middleware.claude-auth-token]
+enabled = false'
   fi
 
   if ! cat > airlock.local.toml <<EOF
@@ -169,6 +181,7 @@ resolution = "docker"
 [env]
 DISABLE_AUTOUPDATER = "1"
 $skip_update_line
+$token_middleware_override
 EOF
   then
     echo "airlock-claude: could not write airlock.local.toml in $PWD" >&2
@@ -192,7 +205,7 @@ home_on_working_filesystem() {
 }
 
 OPTIONS=$(parse_args "$@") || exit $?
-IFS=: read -r REBUILD MONITOR USE_TMUX SHOW_USAGE <<<"$OPTIONS"
+IFS=: read -r REBUILD MONITOR USE_TMUX REMOTE_CONTROL SHOW_USAGE <<<"$OPTIONS"
 [[ -n $SHOW_USAGE ]] && { usage; exit 0; }
 
 require_airlock || exit 1
@@ -206,9 +219,9 @@ fi
 
 build_image_if_needed "$CONTAINER_ENGINE" "$REBUILD" || exit 1
 drop_vm_cache_on_rebuild "$REBUILD"
-generate_airlock_config "${AIRLOCK_CLAUDE_SKIP_UPDATE:-}" || exit 1
+generate_airlock_config "${AIRLOCK_CLAUDE_SKIP_UPDATE:-}" "$REMOTE_CONTROL" || exit 1
 
 HOME=$(home_on_working_filesystem "$HOME") || exit 1
 export HOME
 
-airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} claude --remote-control
+airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} ${REMOTE_CONTROL:+env -u CLAUDE_CODE_OAUTH_TOKEN} claude ${REMOTE_CONTROL:+--remote-control}

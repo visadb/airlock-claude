@@ -177,6 +177,7 @@ new_case; stub_all
 run_script --help
 assert_rc 0 "$RC" "--help exits 0"
 assert_grep "Usage: airlock-claude" "$CASE_DIR/out" "--help prints usage to stdout"
+assert_grep "remote-control" "$CASE_DIR/out" "--help documents --remote-control"
 assert_not_grep "LAUNCH:" "$LOG" "--help does not launch"
 
 new_case; stub_all
@@ -231,6 +232,19 @@ assert_grep 'policy = "deny-by-default"' "$(CONFIG)" "config denies network by d
 assert_grep 'name = "airlock-claude:latest"' "$(CONFIG)" "config points at the built image"
 assert_grep 'DISABLE_AUTOUPDATER = "1"' "$(CONFIG)" "config disables the background autoupdater"
 assert_not_grep "AIRLOCK_CLAUDE_SKIP_UPDATE" "$(CONFIG)" "opt-out absent when unset on the host"
+assert_not_grep "middleware" "$(CONFIG)" "token middleware left enabled without -c"
+
+new_case; stub_all
+run_script -c
+assert_grep '\[network\.middleware\.claude-auth-token\]' "$(CONFIG)" "-c names the preset's token middleware"
+assert_grep 'enabled = false' "$(CONFIG)" "-c disables the token middleware"
+
+new_case; stub_all
+export AIRLOCK_CLAUDE_SKIP_UPDATE=1
+run_script -c
+awk '/^\[env\]/{f=1;next} /^\[/{f=0} f' "$(CONFIG)" > "$CASE_DIR/env-table"
+assert_grep "AIRLOCK_CLAUDE_SKIP_UPDATE" "$CASE_DIR/env-table" \
+  "opt-out stays inside [env] when -c adds a table below it"
 
 new_case; stub_all
 export AIRLOCK_CLAUDE_SKIP_UPDATE=1
@@ -249,9 +263,10 @@ assert_not_grep "LAUNCH:" "$LOG" "unwritable config does not launch"
 section "launch"
 new_case; stub_all
 run_script
-assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude --remote-control" \
+assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude" \
   "$(grep '^LAUNCH:' "$LOG")" "launch argv is exact"
 assert_not_grep "dangerously-skip-permissions" "$LOG" "launch passes no permission flag"
+assert_not_grep "remote-control" "$LOG" "launch passes --remote-control only on request"
 
 new_case; stub_all
 run_script --monitor
@@ -259,7 +274,7 @@ assert_grep "LAUNCH: start --monitor --" "$LOG" "--monitor asks for what is alre
 
 new_case; stub_all
 run_script --no-monitor
-assert_eq "LAUNCH: start -- tmux -u new-session -A -s claude claude --remote-control" \
+assert_eq "LAUNCH: start -- tmux -u new-session -A -s claude claude" \
   "$(grep '^LAUNCH:' "$LOG")" "--no-monitor drops the monitor flag"
 
 new_case; stub_all
@@ -268,12 +283,12 @@ assert_not_grep "monitor" "$LOG" "-M is the short form"
 
 new_case; stub_all
 run_script --tmux
-assert_grep "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude " "$LOG" \
-  "--tmux asks for what is already the default"
+assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude" \
+  "$(grep '^LAUNCH:' "$LOG")" "--tmux asks for what is already the default"
 
 new_case; stub_all
 run_script --no-tmux
-assert_eq "LAUNCH: start --monitor -- claude --remote-control" \
+assert_eq "LAUNCH: start --monitor -- claude" \
   "$(grep '^LAUNCH:' "$LOG")" "--no-tmux runs claude directly"
 
 new_case; stub_all
@@ -282,8 +297,22 @@ assert_not_grep "tmux" "$LOG" "-T is the short form"
 
 new_case; stub_all
 run_script -M -T
-assert_eq "LAUNCH: start -- claude --remote-control" \
+assert_eq "LAUNCH: start -- claude" \
   "$(grep '^LAUNCH:' "$LOG")" "-M and -T together strip both wrappers"
+
+new_case; stub_all
+run_script --remote-control
+assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control" \
+  "$(grep '^LAUNCH:' "$LOG")" "--remote-control clears the token from claude's env and passes the flag"
+
+new_case; stub_all
+run_script -c
+assert_grep "remote-control" "$LOG" "-c is the short form"
+
+new_case; stub_all
+run_script -T -c
+assert_eq "LAUNCH: start --monitor -- env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control" \
+  "$(grep '^LAUNCH:' "$LOG")" "-c without tmux still clears the token"
 
 section "image build"
 new_case; stub_all

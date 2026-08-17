@@ -37,13 +37,13 @@ inputs as arguments and hands back its result on stdout, as a data-flow
 diagram too:
 
 ```
-parse_args "$@"                             -> rebuild:monitor:use_tmux:show_usage
+parse_args "$@"                             -> rebuild:monitor:use_tmux:remote_control:show_usage
 require_airlock                                 before the build, so -r can't spend minutes then fail at the last line
 pick_container_engine                       -> docker | podman
 create_docker_shim                          -> a directory holding a `docker` that runs podman
 build_image_if_needed <engine> <rebuild>        $IMAGE from an inline Dockerfile
 drop_vm_cache_on_rebuild <rebuild>
-generate_airlock_config <skip_update>           writes airlock.local.toml
+generate_airlock_config <skip_update> <remote_control>  writes airlock.local.toml
 home_on_working_filesystem <current_home>   -> the HOME to run airlock with
 ```
 
@@ -63,8 +63,8 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
   the script carries on regardless. Every step is written to be safe to
   capture.
 - The main sequence owns all script state — `REBUILD`, `MONITOR`, `USE_TMUX`,
-  `SHOW_USAGE`, `CONTAINER_ENGINE`, `SHIM_DIR`, `HOME` — assigned from the
-  values the steps return.
+  `REMOTE_CONTROL`, `SHOW_USAGE`, `CONTAINER_ENGINE`, `SHIM_DIR`, `HOME` —
+  assigned from the values the steps return.
 - `SHIM_DIR`, the `EXIT` trap that removes it, and the `PATH` that points at it
   are set at top level rather than inside `create_docker_shim`. A trap and an
   export have to be made by the shell that goes on running, and a trap set
@@ -84,11 +84,11 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
 - The `airlock start` line is deliberately *not* in a function — it's the
   handoff, and keeping it at top level means "what does this script ultimately
   run?" is answered by the last line.
-- Both `${MONITOR:+--monitor}` and `${USE_TMUX:+tmux -u new-session -A -s claude}`
-  on that line are **unquoted on purpose**: an empty one has to disappear
-  entirely rather than become an empty argument. Quoting them "to satisfy
-  shellcheck" breaks `-M` and `-T`, and the suite's exact-argv assertions catch
-  it.
+- The `${MONITOR:+--monitor}`, `${USE_TMUX:+tmux -u new-session -A -s claude}`
+  and `${REMOTE_CONTROL:+...}` expansions on that line are **unquoted on
+  purpose**: an empty one has to disappear entirely rather than become an
+  empty argument. Quoting them "to satisfy shellcheck" breaks `-M`, `-T` and
+  `-c`, and the suite's exact-argv assertions catch it.
 - The tmux flag is `USE_TMUX`, not `TMUX`: tmux sets `TMUX` itself to mark a
   shell as being inside a session, so a variable of ours by that name would be
   read as that one.
@@ -116,6 +116,30 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
   expands it inside `[env]`** rather than appending the key after the fact. An
   appended key joins whichever table ends up last, so adding a table below
   `[env]` would silently move it out and stop the opt-out reaching the VM.
+  Under `-c` there *is* a table below `[env]` — the middleware override — which
+  is exactly why the opt-out has to stay lexically inside `[env]`, above it;
+  the suite asserts that placement.
+- **`-c` disables the preset's `claude-auth-token` middleware in the generated
+  config; clearing the env var alone would not be enough.** The middleware's
+  `env.TOKEN = "${CLAUDE_CODE_OAUTH_TOKEN}"` template resolves from the host
+  env with the airlock secret vault as fallback, and airlock *aborts
+  `airlock start` when it resolves in neither* — so without the override, `-c`
+  would fail on precisely the machine it exists for, one with no token set up.
+  And when the token does resolve, the middleware overwrites the
+  `Authorization` header on every `api.anthropic.com` request, stomping the
+  credentials of the interactive login `-c` exists to enable. `enabled = false`
+  on the preset's named entry is airlock's supported override mechanism: local
+  config merges over presets, and a disabled middleware is skipped before its
+  templates are ever resolved.
+- **The placeholder token is cleared with `env -u` on the launch line, not in
+  the config.** The placeholder comes from the preset's `[env]` table, and
+  airlock's config merge cannot *remove* a key a preset set — later files can
+  only override values, and a `null` never overwrites — so the variable is
+  stripped at exec time instead. It has to go entirely: Claude Code treats a
+  present `CLAUDE_CODE_OAUTH_TOKEN` as its credential and skips interactive
+  login, which is what breaks `--remote-control` in the first place. The login
+  that `-c` forces lands in `~/.claude`, which the preset persists to
+  `~/.airlock/claude/settings` on the host, so it survives across runs.
 - **A failed config write aborts the run instead of falling through to the
   launch.** Otherwise `airlock` would start on whatever `airlock.local.toml` a
   previous run left in the directory, or on its own defaults, and the

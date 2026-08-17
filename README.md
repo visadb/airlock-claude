@@ -128,6 +128,27 @@ To run without the monitor:
 airlock-claude -M        # or --no-monitor
 ```
 
+### Remote control
+
+Normally no login happens in the sandbox at all: `airlock`'s `claude-code`
+preset keeps your real `CLAUDE_CODE_OAUTH_TOKEN` on the host and injects it
+into API requests at the host boundary, so the VM only ever sees a
+placeholder. That's the safest mode — the token can't be stolen from inside
+the sandbox — but Claude Code's `--remote-control` doesn't work on an
+injected token; it needs a real interactive login. To get one:
+
+```sh
+airlock-claude -c        # or --remote-control
+```
+
+`-c` disables the preset's token injection for the run, hides the placeholder
+token from the session, and passes `--remote-control` to `claude`. With no
+token in sight, Claude Code asks you to log in; the login is stored under
+`~/.airlock/claude` on the host (where the preset persists the sandbox's
+`~/.claude`), so later `-c` runs reuse it rather than asking again. The
+trade-off is that in this mode the session's credentials live inside the
+sandbox like any ordinary login.
+
 ### Rebuilding the image
 
 To rebuild the sandbox image from scratch — to pick up newer base packages, or
@@ -163,6 +184,7 @@ a plain run only builds when the image is missing.
    - the sandbox VM image to use
    - `DISABLE_AUTOUPDATER=1` in the VM environment (that only turns off the
      *background* updater — the startup update still runs)
+   - with `-c`, the preset's token-injecting middleware disabled
 4. **Home directory adjustment** — `airlock` hardlinks files out of `HOME` into
    its per-directory state, and a hardlink can't cross a filesystem boundary —
    including a btrfs subvolume boundary, which isn't a separate mount but is a
@@ -171,13 +193,15 @@ a plain run only builds when the image is missing.
    is repointed at that root, putting it on the same filesystem as the state
    being linked into.
 5. **Launch** — runs
-   `airlock start --monitor -- tmux -u new-session -A -s claude claude --remote-control`,
+   `airlock start --monitor -- tmux -u new-session -A -s claude claude`,
    handing off to `airlock` to start the VM and run Claude Code inside it.
    No permission flag appears here: the image's
    `/etc/claude-code/managed-settings.json` already puts the session in
    bypass-permissions mode.
    `-M` drops `--monitor`; `-T` drops the `tmux` wrapper, leaving `claude`
-   as the command `airlock` runs.
+   as the command `airlock` runs; `-c` runs claude as
+   `env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control`, stripping the
+   preset's placeholder token so the interactive login kicks in.
 
 `airlock.local.toml` is regenerated (overwritten) on every run and is not
 meant to be hand-edited or committed. `airlock` keeps the VM disk it converts
