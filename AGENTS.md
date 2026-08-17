@@ -32,19 +32,55 @@ code; two copies drift.
 
 The script is a sequence of one-function-per-step, defined in the order they
 run and called in that order at the bottom, so the call sequence at the end
-reads as a summary of the whole thing:
+reads as a summary of the whole thing — and, because every step takes its
+inputs as arguments and hands back its result on stdout, as a data-flow
+diagram too:
 
 ```
-parse_args              # -M/-T/-r/-h and their long forms; nothing is forwarded to claude
-require_airlock         # before the build, so -r can't spend minutes then fail at the last line
-pick_container_engine   # docker, else podman behind a `docker` shim
-build_image_if_needed   # airlock-claude:latest from an inline Dockerfile
-drop_vm_cache_on_rebuild
-generate_airlock_config # writes airlock.local.toml
-keep_home_on_working_filesystem   # so airlock's hardlinks out of HOME can't cross a filesystem
+parse_args "$@"                             -> rebuild:monitor:use_tmux:show_usage
+require_airlock                                 before the build, so -r can't spend minutes then fail at the last line
+pick_container_engine                       -> docker | podman
+create_docker_shim                          -> a directory holding a `docker` that runs podman
+build_image_if_needed <engine> <rebuild>        $IMAGE from an inline Dockerfile
+drop_vm_cache_on_rebuild <rebuild>
+generate_airlock_config <skip_update>           writes airlock.local.toml
+home_on_working_filesystem <current_home>   -> the HOME to run airlock with
 ```
 
 - Keep new steps as functions in that same defined-in-call-order shape.
+- **Whatever varies is a positional argument, named into a `local` on the
+  first line of the function; outputs are printed.** No step function reads or
+  writes script *state*, so its whole contract is visible at the call site.
+  When a step needs a value from the environment
+  (`AIRLOCK_CLAUDE_SKIP_UPDATE`, `HOME`), the main sequence reads it and passes
+  it in.
+- **Global constants are the exception: `IMAGE` is used where it's needed
+  rather than threaded through arguments.** It never varies, so passing it
+  would document nothing and only make the call sites longer.
+- **Failure is a nonzero `return` with a message on stderr; only the main
+  sequence calls `exit`.** That isn't just tidiness: a function that runs
+  inside `$( )` runs in a subshell, where `exit` ends only the subshell and
+  the script carries on regardless. Every step is written to be safe to
+  capture.
+- The main sequence owns all script state — `REBUILD`, `MONITOR`, `USE_TMUX`,
+  `SHOW_USAGE`, `CONTAINER_ENGINE`, `SHIM_DIR`, `HOME` — assigned from the
+  values the steps return.
+- `SHIM_DIR`, the `EXIT` trap that removes it, and the `PATH` that points at it
+  are set at top level rather than inside `create_docker_shim`. A trap and an
+  export have to be made by the shell that goes on running, and a trap set
+  inside a command substitution would fire when that subshell ended — deleting
+  the shim before it was ever used.
+- `parse_args` joins its four values with `:` and the caller reads them with
+  `IFS=:`. Colon rather than a space because an unset flag is the empty string,
+  and a whitespace `IFS` makes `read` collapse runs of separators, which would
+  silently shift every field after the empty one. A new flag means a new field
+  in both the `printf` and the `read`.
+- `-h`/`--help` sets `show_usage` and `break`s out; the main sequence is what
+  calls `usage`. `parse_args` can't print it itself — it runs inside `$( )`,
+  so its stdout is the return value and the help text would be captured
+  instead of shown. `break` rather than continuing to parse is what keeps
+  `--help --bogus` exiting 0, as it did when `--help` exited from inside the
+  loop.
 - The `airlock start` line is deliberately *not* in a function — it's the
   handoff, and keeping it at top level means "what does this script ultimately
   run?" is answered by the last line.
@@ -53,10 +89,6 @@ keep_home_on_working_filesystem   # so airlock's hardlinks out of HOME can't cro
   entirely rather than become an empty argument. Quoting them "to satisfy
   shellcheck" breaks `-M` and `-T`, and the suite's exact-argv assertions catch
   it.
-- Only `IMAGE` and the handles that outlive their function are global:
-  `REBUILD`, `MONITOR`, `USE_TMUX`, `OCI`, and `SHIM_DIR` (the last because the
-  `EXIT` trap fires long after `pick_container_engine` has returned).
-  Everything else is `local`.
 - The tmux flag is `USE_TMUX`, not `TMUX`: tmux sets `TMUX` itself to mark a
   shell as being inside a session, so a variable of ours by that name would be
   read as that one.
@@ -71,12 +103,12 @@ keep_home_on_working_filesystem   # so airlock's hardlinks out of HOME can't cro
   installed; before the build, because under `-r` the build spends minutes on
   `--no-cache --pull` first, and failing after that would hand the user
   `airlock: command not found` in exchange for the wait.
-- **`pick_container_engine` shims `docker` when only podman is present**
-  because `airlock` always shells out to a literal `docker` command. The shim
-  directory is created with an explicit `mktemp` template: bare `mktemp -d` is
-  a GNU convenience, and BSD `mktemp` — what macOS ships — requires the
-  template. macOS is the case that reaches this path, since podman is the usual
-  engine there.
+- **`create_docker_shim` exists because `airlock` always shells out to a
+  literal `docker` command**, so a podman-only host needs something by that
+  name to forward to podman. The shim directory is created with an explicit
+  `mktemp` template: bare `mktemp -d` is a GNU convenience, and BSD `mktemp` —
+  what macOS ships — requires the template. macOS is the case that reaches this
+  path, since podman is the usual engine there.
 - **`drop_vm_cache_on_rebuild` exists because `airlock` caches the VM disk it
   converts from the OCI image** under `.airlock`, so a freshly built image goes
   unused until that cache is gone.
@@ -84,16 +116,17 @@ keep_home_on_working_filesystem   # so airlock's hardlinks out of HOME can't cro
   expands it inside `[env]`** rather than appending the key after the fact. An
   appended key joins whichever table ends up last, so adding a table below
   `[env]` would silently move it out and stop the opt-out reaching the VM.
-- **A failed config write exits instead of falling through to the launch.**
-  Otherwise `airlock` would start on whatever `airlock.local.toml` a previous
-  run left in the directory, or on its own defaults, and the deny-by-default
-  policy this script exists to impose would silently not be the one in effect.
-- **`keep_home_on_working_filesystem` guards on the answer looking like an
-  absolute path** because `df --output` is GNU-only — BSD `df` rejects it, so a
-  Mac without coreutils' `gdf` gets no answer at all. An unguarded assignment
-  would export an empty `HOME`, which relocates `HOME` without putting it on
-  the working filesystem: the same failure the function exists to prevent,
-  reached by another route.
+- **A failed config write aborts the run instead of falling through to the
+  launch.** Otherwise `airlock` would start on whatever `airlock.local.toml` a
+  previous run left in the directory, or on its own defaults, and the
+  deny-by-default policy this script exists to impose would silently not be the
+  one in effect.
+- **`home_on_working_filesystem` echoes back the `HOME` it was given unless
+  `df` produced something that looks like an absolute path**, because
+  `df --output` is GNU-only — BSD `df` rejects it, so a Mac without coreutils'
+  `gdf` gets no answer at all. Printing the answer unguarded would set `HOME`
+  to the empty string: `HOME` relocated, but not onto the working filesystem,
+  which is the failure this step exists to prevent, reached by another route.
 
 ## The Dockerfile
 

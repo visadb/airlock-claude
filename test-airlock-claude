@@ -188,9 +188,19 @@ run_script --help
 assert_rc 0 "$RC" "--help works with airlock absent"
 
 new_case; stub_all
+run_script -r --help
+assert_rc 0 "$RC" "--help after another flag exits 0"
+assert_grep "Usage: airlock-claude" "$CASE_DIR/out" "--help after another flag still prints usage"
+assert_absent "$(CONFIG)" "--help after another flag does no work"
+
+new_case; stub_all
 run_script --bogus
 assert_rc 2 "$RC" "unknown option exits 2"
 assert_grep "unknown option" "$CASE_DIR/err" "unknown option explains itself"
+
+new_case; stub_all
+run_script --bogus --help
+assert_rc 2 "$RC" "unknown option before --help still exits 2"
 
 section "dependency checks"
 new_case; stub_all_but_airlock
