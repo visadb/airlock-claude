@@ -101,7 +101,7 @@ FROM python:3.14-slim
 RUN DEBIAN_FRONTEND=noninteractive apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates git curl ripgrep jq less procps unzip openssh-client \
-      tmux locales \
+      tmux locales ncurses-term \
  && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen \
  && locale-gen \
  && rm -rf /var/lib/apt/lists/*

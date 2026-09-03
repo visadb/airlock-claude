@@ -163,6 +163,13 @@ permission bypass. What it doesn't cover:
   package here with anything to ask.
 - **`/etc/locale.gen` is overwritten, not appended to**, so exactly one locale
   is built.
+- **`ncurses-term` is installed for the Alacritty terminfo entries
+  (`alacritty`, `alacritty+common`, `alacritty-direct`), despite the trap
+  described in `README.md`.** Installing it overwrites entries
+  `ncurses-base` owns, `xterm-256color` included, which is known to break
+  `tmux` startup. That risk was raised and explicitly accepted rather than
+  worked around — there's no compensating step (like reinstalling
+  `ncurses-base` afterward) in the Dockerfile.
 - **`CLAUDE_INSTALL_HOME=/opt/claude` is a fixed path outside any home
   directory**, so the launcher path doesn't depend on which user the VM ends up
   running as, and the tree is left world-writable (`chmod -R a+rwX`) so a

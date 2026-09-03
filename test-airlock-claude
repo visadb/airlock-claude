@@ -351,8 +351,8 @@ assert_eq "FROM python:3.14-slim" "$(head -1 "$CASE_DIR/Dockerfile")" "Dockerfil
 assert_grep "claude.ai/install.sh" "$CASE_DIR/Dockerfile" "Dockerfile installs Claude Code"
 assert_grep "usr/local/bin/claude" "$CASE_DIR/Dockerfile" "Dockerfile writes the updating wrapper"
 assert_grep "unzip openssh-client" "$CASE_DIR/Dockerfile" "Dockerfile keeps the base package list"
-assert_grep "^ *tmux locales \\\\$" "$CASE_DIR/Dockerfile" "Dockerfile installs tmux and locales, and nothing else"
-assert_not_grep "ncurses-term" "$CASE_DIR/Dockerfile" "Dockerfile does not install ncurses-term"
+assert_grep "^ *tmux locales ncurses-term \\\\$" "$CASE_DIR/Dockerfile" \
+  "Dockerfile installs tmux, locales and ncurses-term, and nothing else"
 assert_grep "^ENV LANG=en_US.UTF-8$" "$CASE_DIR/Dockerfile" "Dockerfile sets a UTF-8 locale"
 assert_grep "en_US.UTF-8 UTF-8' > /etc/locale.gen" "$CASE_DIR/Dockerfile" "Dockerfile seeds locale.gen with that locale"
 assert_grep "locale-gen" "$CASE_DIR/Dockerfile" "Dockerfile generates it"

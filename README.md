@@ -83,10 +83,17 @@ your own `~/.tmux.conf` still overrides it. It sets:
   the VM isn't something it can recognise.
 - `default-terminal "tmux-256color"`, so starting tmux doesn't drop the
   session to 8 colours. That terminfo entry is already in `ncurses-base`,
-  which the base image has, so nothing extra is installed for it — and
-  nothing should be. Installing `ncurses-term` on top destroys the entries
-  `ncurses-base` owns, `xterm-256color` included, and then `tmux` won't start
-  at all: `missing or unsuitable terminal: xterm-256color`.
+  which the base image has. It used to be that nothing else was installed
+  on top of `ncurses-base` for exactly this reason: `ncurses-term` destroys
+  the entries `ncurses-base` owns, `xterm-256color` included, and then
+  `tmux` won't start at all: `missing or unsuitable terminal:
+  xterm-256color`.
+
+  The image now installs `ncurses-term` anyway, to get the Alacritty
+  entries (`alacritty`, `alacritty+common`, `alacritty-direct`) onto the
+  image for hosts using that terminal — so this trap is a live, accepted
+  risk rather than an avoided one. If `tmux` starts failing with that
+  "missing or unsuitable terminal" error after a rebuild, this is why.
 
 The image generates `en_US.UTF-8` at build time — the `locales` package plus a
 one-line `/etc/locale.gen`, so exactly that locale is built and nothing else —
