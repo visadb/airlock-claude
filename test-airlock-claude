@@ -353,6 +353,11 @@ assert_grep "usr/local/bin/claude" "$CASE_DIR/Dockerfile" "Dockerfile writes the
 assert_grep "unzip openssh-client" "$CASE_DIR/Dockerfile" "Dockerfile keeps the base package list"
 assert_grep "^ *tmux locales ncurses-term \\\\$" "$CASE_DIR/Dockerfile" \
   "Dockerfile installs tmux, locales and ncurses-term, and nothing else"
+assert_grep "apt-get install -y --reinstall ncurses-base" "$CASE_DIR/Dockerfile" \
+  "Dockerfile reinstalls ncurses-base to restore the entries ncurses-term hides"
+assert_eq "ncurses-term
+ncurses-base" "$(grep -o 'ncurses-term\|--reinstall ncurses-base' "$CASE_DIR/Dockerfile" | sed 's/--reinstall //')" \
+  "the ncurses-base reinstall comes after ncurses-term"
 assert_grep "^ENV LANG=en_US.UTF-8$" "$CASE_DIR/Dockerfile" "Dockerfile sets a UTF-8 locale"
 assert_grep "en_US.UTF-8 UTF-8' > /etc/locale.gen" "$CASE_DIR/Dockerfile" "Dockerfile seeds locale.gen with that locale"
 assert_grep "locale-gen" "$CASE_DIR/Dockerfile" "Dockerfile generates it"

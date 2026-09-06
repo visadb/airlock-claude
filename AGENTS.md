@@ -154,22 +154,28 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
 
 ## The Dockerfile
 
-`README.md` explains the parts a user sees — the `ncurses-term` trap, the
-`en_US.UTF-8` locale and `tmux -u`, the mouse and clipboard settings, and the
-permission bypass. What it doesn't cover:
+`README.md` explains the parts a user sees — the `en_US.UTF-8` locale and
+`tmux -u`, the mouse and clipboard settings, and the permission bypass. What
+it doesn't cover:
 
 - **`DEBIAN_FRONTEND` is scoped to the `RUN` command** rather than set as an
   `ENV`, so it doesn't follow the image into the session. `locales` is the one
   package here with anything to ask.
 - **`/etc/locale.gen` is overwritten, not appended to**, so exactly one locale
   is built.
-- **`ncurses-term` is installed for the Alacritty terminfo entries
-  (`alacritty`, `alacritty+common`, `alacritty-direct`), despite the trap
-  described in `README.md`.** Installing it overwrites entries
-  `ncurses-base` owns, `xterm-256color` included, which is known to break
-  `tmux` startup. That risk was raised and explicitly accepted rather than
-  worked around — there's no compensating step (like reinstalling
-  `ncurses-base` afterward) in the Dockerfile.
+- **`ncurses-base` is reinstalled immediately after `ncurses-term`.**
+  `ncurses-term` is there for the Alacritty terminfo entries (`alacritty`,
+  `alacritty+common`, `alacritty-direct`), but installing it on this image
+  makes the entries `ncurses-base` owns disappear from the filesystem,
+  `xterm-256color` and `tmux-256color` included, and `tmux` then refuses to
+  start. The packages don't overlap, so a plain install shouldn't be able
+  to do that; the working theory is that it's an artefact of the virtiofs +
+  overlayfs stack airlock builds images on, not of `apt` itself. It isn't
+  understood, only observed. Reinstalling `ncurses-base` afterward restores
+  its entries, so that's the fix. The order matters: the reinstall has to
+  come *after* `ncurses-term`, in the same `RUN` so the apt lists are still
+  present, and before they're deleted. `--reinstall` is what makes apt
+  touch a package that's already at the wanted version.
 - **`CLAUDE_INSTALL_HOME=/opt/claude` is a fixed path outside any home
   directory**, so the launcher path doesn't depend on which user the VM ends up
   running as, and the tree is left world-writable (`chmod -R a+rwX`) so a
