@@ -170,7 +170,7 @@ enabled = false'
   fi
 
   if ! cat > airlock.local.toml <<EOF
-presets = ["claude-code"]
+presets = ["claude-code", "debian", "python"]
 
 [network]
 policy = "deny-by-default"

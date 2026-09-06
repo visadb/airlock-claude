@@ -38,8 +38,9 @@ flag — `/etc/claude-code/managed-settings.json`, Claude Code's system-level
 settings file, sets `permissions.defaultMode` to `bypassPermissions` — so it
 holds for any `claude` started inside the VM, not just the one this script
 launches. Network access is denied by default, apart from what `airlock`'s
-`claude-code` preset allows — enough for Claude Code to reach the API and its
-own update endpoint, and nothing else unless you say so.
+`claude-code`, `debian`, and `python` presets allow — enough for Claude Code
+to reach the API and its own update endpoint, and for `apt` and `pip` to reach
+their package mirrors, and nothing else unless you say so.
 
 An image built before that setting existed starts with prompts on instead;
 rebuild it with `-r`.
@@ -176,7 +177,8 @@ a plain run only builds when the image is missing.
    `airlock-claude -r` to pick up a changed identity.
 3. **Config generation** — writes `airlock.local.toml` in the current
    directory, configuring:
-   - `network.policy = "deny-by-default"`, with the `claude-code` preset
+   - `network.policy = "deny-by-default"`, with the `claude-code`, `debian`,
+     and `python` presets
    - the sandbox VM image to use
    - `DISABLE_AUTOUPDATER=1` in the VM environment (that only turns off the
      *background* updater — the startup update still runs)

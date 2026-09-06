@@ -227,7 +227,7 @@ new_case; stub_all
 run_script
 assert_rc 0 "$RC" "happy path exits 0"
 assert_exists "$(CONFIG)" "config is written"
-assert_grep 'presets = \["claude-code"\]' "$(CONFIG)" "config declares the claude-code preset"
+assert_grep 'presets = \["claude-code", "debian", "python"\]' "$(CONFIG)" "config declares the claude-code, debian and python presets"
 assert_grep 'policy = "deny-by-default"' "$(CONFIG)" "config denies network by default"
 assert_grep 'name = "airlock-claude:latest"' "$(CONFIG)" "config points at the built image"
 assert_grep 'DISABLE_AUTOUPDATER = "1"' "$(CONFIG)" "config disables the background autoupdater"
