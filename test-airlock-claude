@@ -371,6 +371,8 @@ assert_grep "etc/claude-code/CLAUDE.md" "$CASE_DIR/Dockerfile" \
   "Dockerfile writes the system Claude Code memory"
 assert_grep "VERIFY_X509_STRICT" "$CASE_DIR/Dockerfile" \
   "system memory tells Claude Code how to get Python past the TLS proxy"
+assert_grep "delete or overwrite a virtualenv you did not create in this session" \
+  "$CASE_DIR/Dockerfile" "system memory keeps Claude Code out of the host's virtualenvs"
 assert_not_grep "^ *'[^']*'[^']*' \\\\$" "$CASE_DIR/Dockerfile" \
   "printf'd file content has no apostrophe to break its single quotes"
 if awk '/^RUN /{blk=""; grab=1} grab{blk=blk $0 "\n"} grab && !/\\$/{grab=0; print blk "\n"}' \

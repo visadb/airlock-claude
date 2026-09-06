@@ -175,6 +175,16 @@ RUN printf '%s\n' \
       '    s = requests.Session(); s.mount("https://", Adapter())' \
       '' \
       'For a one-off download, curl works without any of this.' \
+      '' \
+      '## Virtualenvs you find here belong to the host' \
+      '' \
+      'The working directory is shared with the host, so any .venv, venv or other' \
+      'virtualenv already in it was almost certainly created on the host, with a' \
+      'different Python at a different path. Its interpreter symlinks, pyvenv.cfg' \
+      'and compiled wheels will not match this sandbox. Never activate, reuse,' \
+      'delete or overwrite a virtualenv you did not create in this session. Make' \
+      'your own under a different name, for example python3 -m venv .venv-airlock,' \
+      'and leave the existing one alone.' \
       > /etc/claude-code/CLAUDE.md
 
 RUN printf '%s\n' \

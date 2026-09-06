@@ -177,8 +177,15 @@ client — by `/etc/claude-code/CLAUDE.md` in the image. That's Claude Code's
 managed-policy memory: it sits next to `managed-settings.json`, is read into
 every session on the machine whichever user runs it, and doesn't touch your
 own `~/.claude/CLAUDE.md`. So a sandboxed session that reaches for Python
-`urllib` already knows what the error means and how to get past it. An image
-built before this file existed doesn't have it; rebuild with `-r`.
+`urllib` already knows what the error means and how to get past it.
+
+The same file also warns Claude Code off virtualenvs it finds in the working
+directory. The directory is shared with the host, so a `.venv` that's already
+there was made by the host's Python, at the host's paths, and won't work in
+the VM; the note says to leave it alone and create a separately named one
+rather than reuse or clobber it.
+
+An image built before this file existed doesn't have it; rebuild with `-r`.
 
 ### Rebuilding the image
 
