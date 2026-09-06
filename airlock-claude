@@ -137,6 +137,47 @@ RUN mkdir -p /etc/claude-code \
       > /etc/claude-code/managed-settings.json
 
 RUN printf '%s\n' \
+      '# Sandbox notes (airlock-claude)' \
+      '' \
+      'This session runs inside an airlock VM. Outbound network access is denied' \
+      'except for allowlisted hosts, and the HTTPS traffic that is allowed goes' \
+      'through the airlock TLS proxy, which re-signs every host with its own' \
+      '"airlock CA". The system trust store already includes that CA, so curl,' \
+      'git, pip and Node work unchanged.' \
+      '' \
+      '## Python HTTPS fails with "Missing Authority Key Identifier"' \
+      '' \
+      'Every Python HTTPS client fails certificate verification here: urllib,' \
+      'http.client, urllib3, requests, httpx and aiohttp all raise' \
+      'CERTIFICATE_VERIFY_FAILED with "Missing Authority Key Identifier" (requests' \
+      'and httpx may say "unable to get local issuer certificate" first). Python' \
+      '3.13+ turns on VERIFY_X509_STRICT by default, and the per-host certificates' \
+      'the proxy issues carry no Authority Key Identifier extension, so strict' \
+      'checking rejects them. SSL_CERT_FILE and REQUESTS_CA_BUNDLE do not help.' \
+      '' \
+      'Fix: build one SSL context with strict checking off and pass it explicitly.' \
+      'Verification itself stays on; do not use verify=False or CERT_NONE.' \
+      '' \
+      '    import ssl' \
+      '    ctx = ssl.create_default_context()' \
+      '    ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT' \
+      '' \
+      '    urllib.request.urlopen(url, context=ctx)' \
+      '    http.client.HTTPSConnection(host, context=ctx)' \
+      '    urllib3.PoolManager(ssl_context=ctx)' \
+      '    httpx.get(url, verify=ctx)            # or httpx.Client(verify=ctx)' \
+      '    session.get(url, ssl=ctx)             # aiohttp' \
+      '' \
+      '    class Adapter(requests.adapters.HTTPAdapter):    # requests' \
+      '        def init_poolmanager(self, *args, **kwargs):' \
+      '            kwargs["ssl_context"] = ctx' \
+      '            return super().init_poolmanager(*args, **kwargs)' \
+      '    s = requests.Session(); s.mount("https://", Adapter())' \
+      '' \
+      'For a one-off download, curl works without any of this.' \
+      > /etc/claude-code/CLAUDE.md
+
+RUN printf '%s\n' \
       'set -g mouse on' \
       'set -g set-clipboard on' \
       'set -as terminal-features ",*:clipboard"' \

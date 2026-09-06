@@ -367,6 +367,18 @@ assert_grep '"defaultMode": "bypassPermissions"' "$CASE_DIR/Dockerfile" \
   "system settings bypass permission prompts"
 assert_grep '"skipDangerousModePermissionPrompt": true' "$CASE_DIR/Dockerfile" \
   "system settings pre-accept the bypass warning"
+assert_grep "etc/claude-code/CLAUDE.md" "$CASE_DIR/Dockerfile" \
+  "Dockerfile writes the system Claude Code memory"
+assert_grep "VERIFY_X509_STRICT" "$CASE_DIR/Dockerfile" \
+  "system memory tells Claude Code how to get Python past the TLS proxy"
+assert_not_grep "^ *'[^']*'[^']*' \\\\$" "$CASE_DIR/Dockerfile" \
+  "printf'd file content has no apostrophe to break its single quotes"
+if awk '/^RUN /{blk=""; grab=1} grab{blk=blk $0 "\n"} grab && !/\\$/{grab=0; print blk "\n"}' \
+     "$CASE_DIR/Dockerfile" | sed 's/^RUN //' | sh -n 2>/dev/null; then
+  pass "every RUN command parses as shell"
+else
+  fail "every RUN command parses as shell"
+fi
 assert_grep "etc/tmux.conf" "$CASE_DIR/Dockerfile" "Dockerfile writes the system tmux config"
 assert_grep "set -g mouse on" "$CASE_DIR/Dockerfile" "system tmux config turns the mouse on"
 assert_eq "$(grep -n 'ARG GIT_USER_NAME' "$CASE_DIR/Dockerfile" | cut -d: -f1)" \

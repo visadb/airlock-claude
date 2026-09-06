@@ -191,6 +191,22 @@ it doesn't cover:
 - **The update runs once per VM boot**, gated on a stamp file in `/tmp`:
   nested `claude` calls must not swap the binary out from under a running
   session.
+- **`/etc/claude-code/CLAUDE.md` is Claude Code's managed-policy memory**,
+  the memory-file counterpart of `managed-settings.json`: Claude Code reads
+  it into every session on the machine, whichever user runs it, ahead of
+  `~/.claude/CLAUDE.md` and the project's. It was confirmed to load for
+  `claude -p` too, by writing a probe word there and asking for it. It's the
+  right place for anything Claude Code should know about *the sandbox* rather
+  than about a project, because the alternatives don't work from a launcher:
+  `~/.claude` in the VM is the host's `~/.airlock/claude/settings`, which the
+  user owns and the `claude-code` preset mounts in — writing a `CLAUDE.md`
+  there would clobber theirs — and a project `CLAUDE.md` would mean writing
+  into every directory the script is run from.
+- **The content written with `printf '%s\n' '...'` must contain no
+  apostrophe.** Each line is a single-quoted shell word inside a `RUN`, so an
+  apostrophe ends the quote and the build fails at that layer. The suite
+  greps for the shape and also runs every `RUN` command through `sh -n`, so
+  a bad line fails in a second rather than after a multi-minute build.
 
 ## Non-obvious behavior
 
@@ -221,6 +237,25 @@ Things that aren't visible from the script at all:
   `~/.claude/settings.json` can't override it. The consequence for the launcher
   is that an image built before this existed starts with prompts on, and `-r`
   is the fix.
+- **Python HTTPS fails in the sandbox because of `VERIFY_X509_STRICT`, not a
+  missing CA.** Every Python client (`urllib`, `http.client`, `urllib3`,
+  `requests`, `httpx`, `aiohttp`) rejects the proxy's certificates with
+  `Missing Authority Key Identifier`; Python 3.13+ sets the strict flag in
+  `ssl.create_default_context()`, and the leaf certificates `airlock` mints
+  per host (`get_or_create_config` in `app/airlock-cli/src/network/tls.rs`,
+  built from `rcgen::CertificateParams::new` with nothing but a CN and a SAN)
+  carry no AKI extension. `pip` and `curl` are unaffected. `SSL_CERT_FILE`
+  changes nothing, since `/usr/lib/ssl/cert.pem` already resolves to the
+  merged bundle. The managed `CLAUDE.md` carries the per-client workaround
+  (a context with the flag cleared), each recipe verified against pypi.org
+  from inside the VM. The real fix is upstream in `airlock`: have the leaf
+  certificates carry an Authority Key Identifier — in `rcgen` that's
+  `use_authority_key_identifier_extension = true` on the leaf's params,
+  with the CA carrying a Subject Key Identifier — after which the note can
+  go. A `sitecustomize.py` in the image that clears the flag globally was
+  considered and rejected: it wouldn't reach virtualenvs, which don't see the
+  base `site-packages`, and would only paper over the gap for the base
+  interpreter.
 - **`airlock` forwards only the env vars the config names**, which is why a
   host `AIRLOCK_CLAUDE_SKIP_UPDATE` has to be written into `[env]` to reach the
   VM at all.
@@ -242,8 +277,9 @@ Things that aren't visible from the script at all:
 - What the suite cannot reach: anything that requires actually building the
   image or booting a VM. The Dockerfile is only checked as *text* (it reaches
   the build on stdin, starts at the right base, keeps the `ARG` pair below the
-  install layer) — nothing verifies it builds, that the wrapper updates, or
-  that airlock accepts the generated config. For those, run `./airlock-claude`
+  install layer, and every `RUN` parses as shell) — nothing verifies it
+  builds, that the wrapper updates, or that airlock accepts the generated
+  config. For those, run `./airlock-claude`
   directly on a machine with `docker` or `podman` and the `airlock` CLI.
 - To iterate on the image without launching a session, extract the Dockerfile
   heredoc, build it by hand, and probe it with

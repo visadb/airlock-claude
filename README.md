@@ -146,6 +146,40 @@ token in sight, Claude Code asks you to log in; the login is stored under
 trade-off is that in this mode the session's credentials live inside the
 sandbox like any ordinary login.
 
+### Python and the TLS proxy
+
+Allowed HTTPS traffic doesn't leave the VM untouched: `airlock` terminates
+TLS at the host, re-signs each host with its own `airlock CA`, and adds that
+CA to the VM's system trust store. `curl`, `git`, `pip` and Node all trust it
+as-is, but every Python HTTPS client — `urllib`, `http.client`, `urllib3`,
+`requests`, `httpx`, `aiohttp` — fails with
+
+```
+CERTIFICATE_VERIFY_FAILED: certificate verify failed: Missing Authority Key Identifier
+```
+
+Python 3.13 turned on `VERIFY_X509_STRICT` by default, and the per-host
+certificates the proxy issues carry no Authority Key Identifier extension,
+which strict checking requires. `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE`
+don't help; the CA is found, the leaf is what's rejected. The workaround is an
+SSL context with strict checking off, passed explicitly to whichever client
+you're using:
+
+```python
+import ssl
+ctx = ssl.create_default_context()
+ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+urllib.request.urlopen(url, context=ctx)
+```
+
+Claude Code is told all of this — symptom, cause, and the recipe for each
+client — by `/etc/claude-code/CLAUDE.md` in the image. That's Claude Code's
+managed-policy memory: it sits next to `managed-settings.json`, is read into
+every session on the machine whichever user runs it, and doesn't touch your
+own `~/.claude/CLAUDE.md`. So a sandboxed session that reaches for Python
+`urllib` already knows what the error means and how to get past it. An image
+built before this file existed doesn't have it; rebuild with `-r`.
+
 ### Rebuilding the image
 
 To rebuild the sandbox image from scratch — to pick up newer base packages, or
@@ -195,7 +229,8 @@ a plain run only builds when the image is missing.
    handing off to `airlock` to start the VM and run Claude Code inside it.
    No permission flag appears here: the image's
    `/etc/claude-code/managed-settings.json` already puts the session in
-   bypass-permissions mode.
+   bypass-permissions mode, and `/etc/claude-code/CLAUDE.md` beside it is the
+   managed memory every session starts with.
    `-M` drops `--monitor`; `-T` drops the `tmux` wrapper, leaving `claude`
    as the command `airlock` runs; `-c` runs claude as
    `env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control`, stripping the
