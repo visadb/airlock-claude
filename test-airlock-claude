@@ -405,6 +405,10 @@ assert_grep '"skipDangerousModePermissionPrompt": true' "$CASE_DIR/Dockerfile" \
   "system settings pre-accept the bypass warning"
 assert_grep "etc/claude-code/CLAUDE.md" "$CASE_DIR/Dockerfile" \
   "Dockerfile writes the system Claude Code memory"
+assert_grep "denied by network policy" "$CASE_DIR/Dockerfile" \
+  "system memory describes the 403 the proxy answers denied requests with"
+assert_grep "remind them to revert the airlock" "$CASE_DIR/Dockerfile" \
+  "system memory tells Claude Code it can ask for temporary network access"
 assert_grep "VERIFY_X509_STRICT" "$CASE_DIR/Dockerfile" \
   "system memory tells Claude Code how to get Python past the TLS proxy"
 assert_grep "delete or overwrite a virtualenv you did not create in this session" \

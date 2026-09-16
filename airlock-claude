@@ -150,6 +150,21 @@ RUN printf '%s\n' \
       '"airlock CA". The system trust store already includes that CA, so curl,' \
       'git, pip and Node work unchanged.' \
       '' \
+      'An HTTP request the policy denies is answered by the proxy itself with' \
+      '403 Forbidden and the body "denied by network policy" (one line). That' \
+      'response means the airlock policy blocked the request, not that the' \
+      'remote server refused it.' \
+      '' \
+      '## Blocked traffic can be allowed interactively' \
+      '' \
+      'The user can usually enable traffic that does not match the allow/deny' \
+      'rules of the airlock policy, temporarily and interactively, from outside' \
+      'the session. If network access beyond the allowlist would be important' \
+      'for the task, ask the user to allow the traffic instead of working' \
+      'around the block. When they do, remind them to revert the airlock' \
+      'network policy once the part of the work that needed the extra access' \
+      'is done.' \
+      '' \
       '## Python HTTPS fails with "Missing Authority Key Identifier"' \
       '' \
       'Every Python HTTPS client fails certificate verification here: urllib,' \

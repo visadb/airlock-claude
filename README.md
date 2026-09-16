@@ -189,6 +189,14 @@ every session on the machine whichever user runs it, and doesn't touch your
 own `~/.claude/CLAUDE.md`. So a sandboxed session that reaches for Python
 `urllib` already knows what the error means and how to get past it.
 
+The same file tells the session what a policy denial looks like — the proxy
+answers a denied HTTP request itself with `403 Forbidden` and the body
+`denied by network policy` — and that you can usually enable non-matching
+traffic interactively and temporarily. So when Claude Code decides network
+access beyond the allowlist matters, it asks you to allow the traffic rather
+than working around the block, and reminds you to revert the policy once the
+part that needed the wider access is done.
+
 The same file also warns Claude Code off virtualenvs it finds in the working
 directory. The directory is shared with the host, so a `.venv` that's already
 there was made by the host's Python, at the host's paths, and won't work in
