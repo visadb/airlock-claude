@@ -37,8 +37,9 @@ inputs as arguments and hands back its result on stdout, as a data-flow
 diagram too:
 
 ```
-parse_args "$@"                             sets REBUILD, MONITOR, USE_TMUX, REMOTE_CONTROL, SHOW_USAGE, CLAUDE_ARGS
+parse_args "$@"                             sets REBUILD, MONITOR, USE_TMUX, REMOTE_CONTROL, THEME, SHOW_USAGE, CLAUDE_ARGS
 require_airlock                                 before the build, so -r can't spend minutes then fail at the last line
+resolve_theme <flag_theme> <env_theme> <colorfgbg>  -> theme for claude's --settings, or nothing
 pick_container_engine                       -> docker | podman
 create_docker_shim                          -> a directory holding a `docker` that runs podman
 build_image_if_needed <engine> <rebuild>        $IMAGE from an inline Dockerfile
@@ -71,9 +72,12 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
   the script carries on regardless. Every step is written to be safe to
   capture.
 - The main sequence owns all remaining script state — `CONTAINER_ENGINE`,
-  `SHIM_DIR`, `HOME` — assigned from the values the steps return; the option
-  globals (`REBUILD`, `MONITOR`, `USE_TMUX`, `REMOTE_CONTROL`, `SHOW_USAGE`)
-  are assigned by `parse_args` itself, per the exemption above.
+  `SHIM_DIR`, `HOME`, `THEME` — assigned from the values the steps return; the
+  option globals (`REBUILD`, `MONITOR`, `USE_TMUX`, `REMOTE_CONTROL`, `THEME`,
+  `SHOW_USAGE`) are assigned by `parse_args` itself, per the exemption above.
+  `THEME` appears in both lists the way `HOME` does: `parse_args` seeds it
+  with the `--theme` value and the main sequence reassigns it from
+  `resolve_theme`, which folds in the env variable and the detection.
 - `SHIM_DIR`, the `EXIT` trap that removes it, and the `PATH` that points at it
   are set at top level rather than inside `create_docker_shim`. A trap and an
   export have to be made by the shell that goes on running, and a trap set
@@ -86,11 +90,16 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
 - The `airlock start` line is deliberately *not* in a function — it's the
   handoff, and keeping it at top level means "what does this script ultimately
   run?" is answered by the last line.
-- The `${MONITOR:+--monitor}`, `${USE_TMUX:+tmux -u new-session -A -s claude}`
-  and `${REMOTE_CONTROL:+...}` expansions on that line are **unquoted on
-  purpose**: an empty one has to disappear entirely rather than become an
-  empty argument. Quoting them "to satisfy shellcheck" breaks `-M`, `-T` and
-  `-c`, and the suite's exact-argv assertions catch it. `"${CLAUDE_ARGS[@]}"`
+- The `${MONITOR:+--monitor}`, `${USE_TMUX:+tmux -u new-session -A -s claude}`,
+  `${REMOTE_CONTROL:+...}` and `${THEME:+...}` expansions on that line are
+  **unquoted on purpose**: an empty one has to disappear entirely rather than
+  become an empty argument. Quoting them "to satisfy shellcheck" breaks `-M`,
+  `-T`, `-c` and the theme, and the suite's exact-argv assertions catch it.
+  Inside `${THEME:+...}` the escaped quotes around the settings JSON are the
+  opposite and load-bearing the other way: they keep `{"theme":"dark"}` one
+  word through the unquoted expansion, and the suite's `ARGV` dump asserts
+  that too. The theme sits before `"${CLAUDE_ARGS[@]}"` so a user-forwarded
+  `--settings` can override it wherever `claude` resolves a repeat last-wins. `"${CLAUDE_ARGS[@]}"`
   at the end is the opposite, quoted on purpose: a quoted `[@]` expansion
   keeps each forwarded argument exactly one word — a multi-word `-p` prompt
   included — and an empty array still vanishes rather than becoming an empty
@@ -111,6 +120,39 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
   installed; before the build, because under `-r` the build spends minutes on
   `--no-cache --pull` first, and failing after that would hand the user
   `airlock: command not found` in exchange for the wait.
+- **`resolve_theme` settles dark-versus-light on the host because Claude
+  Code's own detection can't.** Claude Code asks its terminal for the
+  background colour with an OSC 11 query, but from inside the VM that query
+  stops at tmux, which doesn't forward it to the host terminal, so the
+  sandboxed session guesses. The host side can ask, with the same query, so
+  the script does — before handing the terminal to `airlock`. The probe
+  order encodes trust: an actual terminal answer outranks the macOS
+  appearance (dark terminals on light desktops are common), which outranks
+  the `COLORFGBG` heuristic (set once at terminal startup and often stale).
+  An empty result means no `--settings` flag at all, so claude's own
+  persisted theme stands rather than being stomped by a default.
+- **The theme rides on `--settings '{"theme":…}'` rather than in any file.**
+  `managed-settings.json` is baked at image build, which would freeze the
+  theme until a `-r`; the VM's `~/.claude` is the user's own persisted state
+  (mounted from `~/.airlock/claude`), and writing there would permanently
+  clobber a choice they made in-session. The per-invocation flag scopes the
+  override to the launch, which is exactly the scope the theme has on the
+  host. It runs early, next to `require_airlock`, so a typo'd `--theme`
+  fails before a build can spend minutes.
+- **`theme_from_terminal_background` gates on `-t 0 && -t 2`, not `-t 1`.**
+  `resolve_theme` runs inside `$( )`, where stdout is the capture pipe, so
+  `-t 1` would be false precisely when the script is used normally; stderr
+  is the stream still pointing at the terminal. The gate is also what keeps
+  the suite — which redirects both — from sending real escape queries at
+  whatever terminal runs the tests.
+- **The OSC reply `read` uses an integer `-t 1` on purpose**: macOS
+  `/bin/bash` is 3.2, where a fractional timeout is an error, and the
+  `#!/bin/bash` shebang resolves to it there. The full second is only ever
+  waited out by a terminal that answers BEL-terminated or not at all —
+  `read -d '\'` returns the moment an ST terminator's backslash arrives, and
+  on timeout it still hands over what it consumed, which is why a
+  BEL-terminated reply parses anyway (`channel_as_8_bit` strips the trailing
+  terminator as non-hex).
 - **`create_docker_shim` exists because `airlock` always shells out to a
   literal `docker` command**, so a podman-only host needs something by that
   name to forward to podman. The shim directory is created with an explicit
@@ -266,7 +308,14 @@ Things that aren't visible from the script at all:
   interpreter.
 - **`airlock` forwards only the env vars the config names**, which is why a
   host `AIRLOCK_CLAUDE_SKIP_UPDATE` has to be written into `[env]` to reach the
-  VM at all.
+  VM at all. `AIRLOCK_CLAUDE_THEME` deliberately isn't in `[env]`: nothing in
+  the VM reads it — it's consumed on the host by `resolve_theme` and delivered
+  as a `claude` flag instead.
+- **The theme only applies when tmux creates the session.** `new-session -A`
+  attaches to an existing session named `claude` and ignores the rest of its
+  command line, so on the rare path where a previous session is still alive,
+  a changed host theme (like any changed `claude` flag) waits for the next
+  fresh session.
 - **The `HOME` redirect exists because `airlock` hardlinks files out of `HOME`**
   into its per-directory state, and a hardlink can't cross a filesystem
   boundary. btrfs subvolumes are the case that surprises people: one mount, but

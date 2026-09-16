@@ -156,6 +156,33 @@ token in sight, Claude Code asks you to log in; the login is stored under
 trade-off is that in this mode the session's credentials live inside the
 sandbox like any ordinary login.
 
+### The colour theme
+
+Claude Code normally picks dark or light by asking the terminal for its
+background colour, but from inside the VM that question can't reach your
+terminal — it stops at tmux and the VM boundary — so the sandboxed session
+is left guessing. Instead, the theme is settled on the host at launch:
+
+```sh
+airlock-claude --theme light     # or dark, auto, dark-daltonized,
+                                 # light-daltonized, dark-ansi, light-ansi
+```
+
+Without the flag (or the `AIRLOCK_CLAUDE_THEME` environment variable, which
+the flag overrides), the script detects it: it asks the terminal for its
+background colour the same way Claude Code would — an OSC 11 query, which
+most terminals answer, over SSH too — and falls back to the macOS system
+appearance, then to the `COLORFGBG` variable some terminals export. The
+answer is handed to `claude` as `--settings '{"theme":"…"}'`, which applies
+for that launch without touching your persisted settings: a theme you pick
+by hand inside a session still sticks for the session, and is overridden
+again the next time the script launches one. If nothing on the host gives an
+answer, no flag is passed and claude's own theme setting stands.
+
+The theme is fixed when the VM's tmux session is created; on the rare path
+where a relaunch attaches to a still-running session, a changed host theme
+waits for the next fresh one.
+
 ### Python and the TLS proxy
 
 Allowed HTTPS traffic doesn't leave the VM untouched: `airlock` terminates
@@ -259,7 +286,8 @@ a plain run only builds when the image is missing.
    `-M` drops `--monitor`; `-T` drops the `tmux` wrapper, leaving `claude`
    as the command `airlock` runs; `-c` runs claude as
    `env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control`, stripping the
-   preset's placeholder token so the interactive login kicks in. Arguments
+   preset's placeholder token so the interactive login kicks in. A theme,
+   given or detected, rides along as `--settings '{"theme":"…"}'`. Arguments
    after `--` on the `airlock-claude` command line are appended to that
    `claude` command verbatim, after any flags the script adds itself.
 

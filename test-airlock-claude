@@ -78,7 +78,8 @@ new_case() {
   : > "$LOG"
   export LOG CASE_DIR
   export STUB_IMAGE_MISSING= STUB_BUILD_FAILS= DF_MODE=root PROBE_DOCKER= DUMP_ARGV=
-  unset AIRLOCK_CLAUDE_SKIP_UPDATE
+  export DEFAULTS_MODE=dark
+  unset AIRLOCK_CLAUDE_SKIP_UPDATE AIRLOCK_CLAUDE_THEME COLORFGBG
   RC=0
 }
 
@@ -149,6 +150,20 @@ EOF
   chmod +x "$BIN/git"
 }
 
+stub_defaults() {
+  cat > "$BIN/defaults" <<'EOF'
+#!/bin/sh
+case "${DEFAULTS_MODE:-dark}" in
+  dark) echo Dark ;;
+  light)
+    echo "The domain/default pair of (kCFPreferencesAnyApplication, AppleInterfaceStyle) does not exist" >&2
+    exit 1 ;;
+esac
+exit 0
+EOF
+  chmod +x "$BIN/defaults"
+}
+
 stub_all() { stub_engine docker; stub_airlock; stub_df; stub_git; }
 stub_all_but_airlock() { stub_engine docker; stub_df; stub_git; }
 stub_all_but_container_engine() { stub_airlock; stub_df; stub_git; }
@@ -182,6 +197,7 @@ assert_rc 0 "$RC" "--help exits 0"
 assert_grep "Usage: airlock-claude" "$CASE_DIR/out" "--help prints usage to stdout"
 assert_grep "remote-control" "$CASE_DIR/out" "--help documents --remote-control"
 assert_grep "passed to claude verbatim" "$CASE_DIR/out" "--help documents -- forwarding"
+assert_grep "--theme <theme>" "$CASE_DIR/out" "--help documents --theme"
 assert_not_grep "LAUNCH:" "$LOG" "--help does not launch"
 
 new_case; stub_all
@@ -349,6 +365,86 @@ new_case; stub_all
 run_script -T -c -- --resume
 assert_eq "LAUNCH: start --monitor -- env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control --resume" \
   "$(grep '^LAUNCH:' "$LOG")" "forwarded arguments come after the flags -c adds"
+
+section "theme"
+new_case; stub_all
+run_script --theme dark
+assert_eq 'LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude --settings {"theme":"dark"}' \
+  "$(grep '^LAUNCH:' "$LOG")" "--theme hands claude the theme as settings JSON"
+
+new_case; stub_all
+export DUMP_ARGV=1
+run_script --theme dark
+assert_grep 'ARGV\[{"theme":"dark"}\]' "$LOG" "the settings JSON survives as one word"
+
+new_case; stub_all
+run_script --theme=light
+assert_grep '{"theme":"light"}' "$LOG" "--theme=value is the joined form"
+
+new_case; stub_all
+run_script -T -c --theme dark -- --resume
+assert_eq 'LAUNCH: start --monitor -- env -u CLAUDE_CODE_OAUTH_TOKEN claude --settings {"theme":"dark"} --remote-control --resume' \
+  "$(grep '^LAUNCH:' "$LOG")" "the theme comes before the flags -c adds and the forwarded arguments"
+
+new_case; stub_all
+run_script --theme purple
+assert_rc 2 "$RC" "unknown theme exits 2"
+assert_grep "unknown theme" "$CASE_DIR/err" "unknown theme explains itself"
+assert_not_grep "LAUNCH:" "$LOG" "unknown theme does not launch"
+
+new_case; stub_all
+run_script --theme
+assert_rc 2 "$RC" "--theme without a value exits 2"
+assert_grep "needs a value" "$CASE_DIR/err" "missing theme value explains itself"
+
+new_case; stub_all
+export AIRLOCK_CLAUDE_THEME=light
+run_script
+assert_grep '{"theme":"light"}' "$LOG" "AIRLOCK_CLAUDE_THEME sets the theme from the host env"
+
+new_case; stub_all
+export AIRLOCK_CLAUDE_THEME=light
+run_script --theme dark
+assert_grep '{"theme":"dark"}' "$LOG" "--theme wins over AIRLOCK_CLAUDE_THEME"
+assert_not_grep '{"theme":"light"}' "$LOG" "the losing env theme does not also ride along"
+
+new_case; stub_all
+export AIRLOCK_CLAUDE_THEME=purple
+run_script
+assert_rc 2 "$RC" "an invalid AIRLOCK_CLAUDE_THEME exits 2"
+
+new_case; stub_all; stub_defaults
+run_script
+assert_grep '{"theme":"dark"}' "$LOG" "a dark macOS appearance selects the dark theme"
+
+new_case; stub_all; stub_defaults
+export DEFAULTS_MODE=light
+run_script
+assert_grep '{"theme":"light"}' "$LOG" "a light macOS appearance selects the light theme"
+
+new_case; stub_all
+export COLORFGBG="15;0"
+run_script
+assert_grep '{"theme":"dark"}' "$LOG" "a dark COLORFGBG background selects the dark theme"
+
+new_case; stub_all
+export COLORFGBG="0;15"
+run_script
+assert_grep '{"theme":"light"}' "$LOG" "a light COLORFGBG background selects the light theme"
+
+new_case; stub_all; stub_defaults
+export COLORFGBG="0;15"
+run_script
+assert_grep '{"theme":"dark"}' "$LOG" "the macOS appearance outranks the COLORFGBG heuristic"
+
+new_case; stub_all
+export COLORFGBG="default;default"
+run_script
+assert_not_grep "settings" "$LOG" "an unusable COLORFGBG is ignored"
+
+new_case; stub_all
+run_script
+assert_not_grep "settings" "$LOG" "no theme answer means no settings flag"
 
 section "image build"
 new_case; stub_all

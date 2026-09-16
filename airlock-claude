@@ -5,7 +5,8 @@ IMAGE=airlock-claude:latest
 usage() {
   cat <<'USAGE'
 Usage: airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-c|--remote-control]
-                      [-r|--rebuild-image] [-h|--help] [-- <claude args...>]
+                      [--theme <theme>] [-r|--rebuild-image] [-h|--help]
+                      [-- <claude args...>]
 
 Runs Claude Code sandboxed in an airlock VM in the current directory,
 building the sandbox image and generating airlock config as needed.
@@ -25,6 +26,16 @@ The session runs inside tmux, under airlock's monitor TUI, by default.
                        for an interactive login instead — remote control
                        doesn't work on an injected token. The login is
                        saved under ~/.airlock/claude and reused next run.
+  --theme <theme>      Tell claude which colour theme to use: dark, light,
+                       auto, dark-daltonized, light-daltonized, dark-ansi or
+                       light-ansi. The AIRLOCK_CLAUDE_THEME environment
+                       variable sets the same thing; the flag wins. Without
+                       either, the theme is picked on the host — the terminal
+                       is asked for its background colour, then the macOS
+                       appearance and COLORFGBG are consulted — because
+                       claude's own detection can't reach the host terminal
+                       from inside the VM. When nothing answers, claude keeps
+                       whatever theme it already had.
   -r, --rebuild-image  Rebuild the sandbox image from scratch, ignoring the
                        layer cache and re-pulling the base image, and drop
                        the local .airlock directory so airlock converts the
@@ -39,7 +50,7 @@ USAGE
 }
 
 parse_args() {
-  REBUILD= MONITOR=1 USE_TMUX=1 REMOTE_CONTROL= SHOW_USAGE= CLAUDE_ARGS=()
+  REBUILD= MONITOR=1 USE_TMUX=1 REMOTE_CONTROL= THEME= SHOW_USAGE= CLAUDE_ARGS=()
   while [[ $# -gt 0 ]]; do
     case $1 in
       --) shift; CLAUDE_ARGS=("$@"); return 0 ;;
@@ -48,6 +59,14 @@ parse_args() {
       -t|--tmux) USE_TMUX=1 ;;
       -T|--no-tmux) USE_TMUX= ;;
       -c|--remote-control) REMOTE_CONTROL=1 ;;
+      --theme)
+        if [[ $# -lt 2 ]]; then
+          echo "airlock-claude: --theme needs a value" >&2
+          return 2
+        fi
+        THEME=$2
+        shift ;;
+      --theme=*) THEME=${1#--theme=} ;;
       -r|--rebuild-image) REBUILD=1 ;;
       -h|--help) SHOW_USAGE=1; break ;;
       *)
@@ -64,6 +83,90 @@ require_airlock() {
     echo "airlock not found in PATH" >&2
     return 1
   fi
+}
+
+validate_theme() {
+  local theme=$1
+  case $theme in
+    dark|light|auto|dark-daltonized|light-daltonized|dark-ansi|light-ansi)
+      return 0 ;;
+    *)
+      echo "airlock-claude: unknown theme: $theme" >&2
+      echo "Themes: dark light auto dark-daltonized light-daltonized dark-ansi light-ansi" >&2
+      return 2 ;;
+  esac
+}
+
+channel_as_8_bit() {
+  local hex=${1%%[!0-9a-fA-F]*}
+  if [[ -z $hex || ${#hex} -gt 4 ]]; then
+    return 1
+  fi
+  if [[ ${#hex} -eq 1 ]]; then
+    hex=$hex$hex
+  fi
+  printf '%d\n' "$((16#${hex:0:2}))"
+}
+
+theme_from_terminal_background() {
+  [[ -t 0 && -t 2 ]] || return 1
+  local saved_tty_state reply= channels r g b
+  saved_tty_state=$(stty -g </dev/tty 2>/dev/null) || return 1
+  stty -icanon -echo min 0 time 0 </dev/tty 2>/dev/null || return 1
+  printf '\033]11;?\033\\' >/dev/tty
+  IFS= read -rs -t 1 -d '\' reply </dev/tty
+  stty "$saved_tty_state" </dev/tty 2>/dev/null
+  case $reply in
+    *rgba:*) channels=${reply#*rgba:} ;;
+    *rgb:*) channels=${reply#*rgb:} ;;
+    *) return 1 ;;
+  esac
+  IFS=/ read -r r g b _ <<<"$channels"
+  r=$(channel_as_8_bit "$r") && g=$(channel_as_8_bit "$g") \
+    && b=$(channel_as_8_bit "$b") || return 1
+  if (( 2126 * r + 7152 * g + 722 * b >= 1280000 )); then
+    printf 'light\n'
+  else
+    printf 'dark\n'
+  fi
+}
+
+theme_from_macos_appearance() {
+  command -v defaults >/dev/null 2>&1 || return 1
+  local style
+  style=$(defaults read -g AppleInterfaceStyle 2>&1)
+  case $style in
+    Dark) printf 'dark\n' ;;
+    *"does not exist"*) printf 'light\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+theme_from_colorfgbg() {
+  local colorfgbg=$1
+  local background=${colorfgbg##*;}
+  if [[ $background == "$colorfgbg" || -z $background || $background == *[!0-9]* ]]; then
+    return 1
+  fi
+  if (( background == 7 || background >= 9 )); then
+    printf 'light\n'
+  else
+    printf 'dark\n'
+  fi
+}
+
+resolve_theme() {
+  local flag_theme=$1 env_theme=$2 colorfgbg=$3
+  local requested=${flag_theme:-$env_theme}
+  if [[ -n $requested ]]; then
+    validate_theme "$requested" || return 2
+    printf '%s\n' "$requested"
+    return 0
+  fi
+  theme_from_terminal_background && return 0
+  theme_from_macos_appearance && return 0
+  theme_from_colorfgbg "$colorfgbg" && return 0
+  return 0
 }
 
 pick_container_engine() {
@@ -291,6 +394,8 @@ parse_args "$@" || exit $?
 
 require_airlock || exit 1
 
+THEME=$(resolve_theme "$THEME" "${AIRLOCK_CLAUDE_THEME:-}" "${COLORFGBG:-}") || exit 2
+
 CONTAINER_ENGINE=$(pick_container_engine) || exit 1
 if [[ $CONTAINER_ENGINE == podman ]]; then
   SHIM_DIR=$(create_docker_shim) || exit 1
@@ -305,4 +410,4 @@ generate_airlock_config "${AIRLOCK_CLAUDE_SKIP_UPDATE:-}" "$REMOTE_CONTROL" || e
 HOME=$(home_on_working_filesystem "$HOME") || exit 1
 export HOME
 
-airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} ${REMOTE_CONTROL:+env -u CLAUDE_CODE_OAUTH_TOKEN} claude ${REMOTE_CONTROL:+--remote-control} "${CLAUDE_ARGS[@]}"
+airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} ${REMOTE_CONTROL:+env -u CLAUDE_CODE_OAUTH_TOKEN} claude ${THEME:+--settings "{\"theme\":\"$THEME\"}"} ${REMOTE_CONTROL:+--remote-control} "${CLAUDE_ARGS[@]}"
