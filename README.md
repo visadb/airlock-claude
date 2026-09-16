@@ -31,6 +31,16 @@ after that reuses it.
 Each invocation writes a fresh `airlock.local.toml` for the current directory
 and starts Claude Code inside an `airlock` VM.
 
+Anything after `--` is passed to `claude` unchanged:
+
+```sh
+airlock-claude -- --resume
+airlock-claude -M -- -p "run the tests and fix failures"
+```
+
+The script's own flags stop at the `--`, so a flag `claude` understands never
+has to be known to this script.
+
 Claude Code runs in bypass-permissions mode, which is the point of the
 exercise: the VM is the sandbox, so permission prompts aren't what's keeping
 the session contained. That comes from the image rather than a command-line
@@ -241,7 +251,9 @@ a plain run only builds when the image is missing.
    `-M` drops `--monitor`; `-T` drops the `tmux` wrapper, leaving `claude`
    as the command `airlock` runs; `-c` runs claude as
    `env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control`, stripping the
-   preset's placeholder token so the interactive login kicks in.
+   preset's placeholder token so the interactive login kicks in. Arguments
+   after `--` on the `airlock-claude` command line are appended to that
+   `claude` command verbatim, after any flags the script adds itself.
 
 `airlock.local.toml` is regenerated (overwritten) on every run and is not
 meant to be hand-edited or committed. `airlock` keeps the VM disk it converts

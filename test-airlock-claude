@@ -77,7 +77,7 @@ new_case() {
   mkdir -p "$BIN" "$WORK" "$FAKE_HOME"
   : > "$LOG"
   export LOG CASE_DIR
-  export STUB_IMAGE_MISSING= STUB_BUILD_FAILS= DF_MODE=root PROBE_DOCKER=
+  export STUB_IMAGE_MISSING= STUB_BUILD_FAILS= DF_MODE=root PROBE_DOCKER= DUMP_ARGV=
   unset AIRLOCK_CLAUDE_SKIP_UPDATE
   RC=0
 }
@@ -108,6 +108,9 @@ stub_airlock() {
 #!/bin/sh
 echo "LAUNCH: $*" >> "$LOG"
 echo "LAUNCH_HOME: $HOME" >> "$LOG"
+if [ -n "${DUMP_ARGV:-}" ]; then
+  for arg; do echo "ARGV[$arg]" >> "$LOG"; done
+fi
 if [ -n "${PROBE_DOCKER:-}" ]; then
   echo "SHIM_PATH: $(command -v docker)" >> "$LOG"
   docker probe-from-airlock
@@ -178,6 +181,7 @@ run_script --help
 assert_rc 0 "$RC" "--help exits 0"
 assert_grep "Usage: airlock-claude" "$CASE_DIR/out" "--help prints usage to stdout"
 assert_grep "remote-control" "$CASE_DIR/out" "--help documents --remote-control"
+assert_grep "passed to claude verbatim" "$CASE_DIR/out" "--help documents -- forwarding"
 assert_not_grep "LAUNCH:" "$LOG" "--help does not launch"
 
 new_case; stub_all
@@ -202,6 +206,16 @@ assert_grep "unknown option" "$CASE_DIR/err" "unknown option explains itself"
 new_case; stub_all
 run_script --bogus --help
 assert_rc 2 "$RC" "unknown option before --help still exits 2"
+
+new_case; stub_all
+run_script -- --bogus
+assert_rc 0 "$RC" "arguments after -- are not parsed as this script's options"
+
+new_case; stub_all
+run_script -- --help
+assert_rc 0 "$RC" "--help after -- belongs to claude"
+assert_not_grep "Usage: airlock-claude" "$CASE_DIR/out" "--help after -- does not print this script's usage"
+assert_grep "claude --help" "$LOG" "--help after -- reaches claude"
 
 section "dependency checks"
 new_case; stub_all_but_airlock
@@ -313,6 +327,28 @@ new_case; stub_all
 run_script -T -c
 assert_eq "LAUNCH: start --monitor -- env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control" \
   "$(grep '^LAUNCH:' "$LOG")" "-c without tmux still clears the token"
+
+new_case; stub_all
+run_script -- --resume
+assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude --resume" \
+  "$(grep '^LAUNCH:' "$LOG")" "arguments after -- reach claude"
+
+new_case; stub_all
+run_script --
+assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude" \
+  "$(grep '^LAUNCH:' "$LOG")" "a bare -- forwards nothing"
+
+new_case; stub_all
+export DUMP_ARGV=1
+run_script -M -T -- -p "multi word prompt"
+assert_eq "LAUNCH: start -- claude -p multi word prompt" \
+  "$(grep '^LAUNCH:' "$LOG")" "forwarded arguments combine with wrapper flags"
+assert_grep 'ARGV\[multi word prompt\]' "$LOG" "a multi-word argument survives as one word"
+
+new_case; stub_all
+run_script -T -c -- --resume
+assert_eq "LAUNCH: start --monitor -- env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control --resume" \
+  "$(grep '^LAUNCH:' "$LOG")" "forwarded arguments come after the flags -c adds"
 
 section "image build"
 new_case; stub_all

@@ -37,7 +37,7 @@ inputs as arguments and hands back its result on stdout, as a data-flow
 diagram too:
 
 ```
-parse_args "$@"                             sets REBUILD, MONITOR, USE_TMUX, REMOTE_CONTROL, SHOW_USAGE
+parse_args "$@"                             sets REBUILD, MONITOR, USE_TMUX, REMOTE_CONTROL, SHOW_USAGE, CLAUDE_ARGS
 require_airlock                                 before the build, so -r can't spend minutes then fail at the last line
 pick_container_engine                       -> docker | podman
 create_docker_shim                          -> a directory holding a `docker` that runs podman
@@ -55,8 +55,8 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
   (`AIRLOCK_CLAUDE_SKIP_UPDATE`, `HOME`), the main sequence reads it and passes
   it in.
 - **`parse_args` is the one deliberate exemption from that rule: it sets its
-  option globals directly instead of printing them.** Its output is about to
-  grow an arbitrary-argument array — `CLAUDE_ARGS`, extra arguments after `--`
+  option globals directly instead of printing them.** Its output includes an
+  arbitrary-argument array — `CLAUDE_ARGS`, the arguments after `--`,
   forwarded verbatim to `claude` — and arbitrary user strings can't ride
   safely through a delimiter-joined stdout channel, while a bash array can't
   be returned through stdout at all. Setting globals from a function that runs
@@ -90,7 +90,13 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
   and `${REMOTE_CONTROL:+...}` expansions on that line are **unquoted on
   purpose**: an empty one has to disappear entirely rather than become an
   empty argument. Quoting them "to satisfy shellcheck" breaks `-M`, `-T` and
-  `-c`, and the suite's exact-argv assertions catch it.
+  `-c`, and the suite's exact-argv assertions catch it. `"${CLAUDE_ARGS[@]}"`
+  at the end is the opposite, quoted on purpose: a quoted `[@]` expansion
+  keeps each forwarded argument exactly one word — a multi-word `-p` prompt
+  included — and an empty array still vanishes rather than becoming an empty
+  argument, because `"${arr[@]}"` of an empty array expands to zero words.
+  It sits last so the user's arguments can override what the wrapper adds
+  wherever `claude` resolves a repeated flag last-wins.
 - The tmux flag is `USE_TMUX`, not `TMUX`: tmux sets `TMUX` itself to mark a
   shell as being inside a session, so a variable of ours by that name would be
   read as that one.

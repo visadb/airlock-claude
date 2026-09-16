@@ -5,7 +5,7 @@ IMAGE=airlock-claude:latest
 usage() {
   cat <<'USAGE'
 Usage: airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-c|--remote-control]
-                      [-r|--rebuild-image] [-h|--help]
+                      [-r|--rebuild-image] [-h|--help] [-- <claude args...>]
 
 Runs Claude Code sandboxed in an airlock VM in the current directory,
 building the sandbox image and generating airlock config as needed.
@@ -30,13 +30,19 @@ The session runs inside tmux, under airlock's monitor TUI, by default.
                        the local .airlock directory so airlock converts the
                        refreshed image instead of its cached VM disk.
   -h, --help           Show this help.
+
+Arguments after -- are passed to claude verbatim:
+
+  airlock-claude -- --resume
+  airlock-claude -M -- -p "run the tests"
 USAGE
 }
 
 parse_args() {
-  REBUILD= MONITOR=1 USE_TMUX=1 REMOTE_CONTROL= SHOW_USAGE=
+  REBUILD= MONITOR=1 USE_TMUX=1 REMOTE_CONTROL= SHOW_USAGE= CLAUDE_ARGS=()
   while [[ $# -gt 0 ]]; do
     case $1 in
+      --) shift; CLAUDE_ARGS=("$@"); return 0 ;;
       -m|--monitor) MONITOR=1 ;;
       -M|--no-monitor) MONITOR= ;;
       -t|--tmux) USE_TMUX=1 ;;
@@ -274,4 +280,4 @@ generate_airlock_config "${AIRLOCK_CLAUDE_SKIP_UPDATE:-}" "$REMOTE_CONTROL" || e
 HOME=$(home_on_working_filesystem "$HOME") || exit 1
 export HOME
 
-airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} ${REMOTE_CONTROL:+env -u CLAUDE_CODE_OAUTH_TOKEN} claude ${REMOTE_CONTROL:+--remote-control}
+airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} ${REMOTE_CONTROL:+env -u CLAUDE_CODE_OAUTH_TOKEN} claude ${REMOTE_CONTROL:+--remote-control} "${CLAUDE_ARGS[@]}"
