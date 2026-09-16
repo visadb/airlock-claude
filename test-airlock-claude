@@ -204,6 +204,7 @@ assert_grep "Usage: airlock-claude" "$CASE_DIR/out" "--help prints usage to stdo
 assert_grep "remote-control" "$CASE_DIR/out" "--help documents --remote-control"
 assert_grep "passed to claude verbatim" "$CASE_DIR/out" "--help documents -- forwarding"
 assert_grep "--theme <theme>" "$CASE_DIR/out" "--help documents --theme"
+assert_grep "\-x, --exec" "$CASE_DIR/out" "--help documents --exec"
 assert_grep "pty.dump" "$CASE_DIR/out" "--help documents the session log"
 assert_not_grep "LAUNCH:" "$LOG" "--help does not launch"
 
@@ -372,6 +373,51 @@ new_case; stub_all
 run_script -T -c -- --resume
 assert_eq "LAUNCH: start --monitor -- env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control --resume" \
   "$(grep '^LAUNCH:' "$LOG")" "forwarded arguments come after the flags -c adds"
+
+section "exec"
+new_case; stub_all
+run_script -x -- bash
+assert_rc 0 "$RC" "-x with a command exits 0"
+assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude bash" \
+  "$(grep '^LAUNCH:' "$LOG")" "-x replaces claude with the command after --"
+assert_not_grep " claude claude" "$LOG" "claude itself is gone from the launch"
+
+new_case; stub_all
+export DUMP_ARGV=1
+run_script -M -T --exec -- sh -c "echo two words"
+assert_eq "LAUNCH: start -- sh -c echo two words" \
+  "$(grep '^LAUNCH:' "$LOG")" "--exec combines with the wrapper flags"
+assert_grep 'ARGV\[echo two words\]' "$LOG" "a multi-word command argument survives as one word"
+
+new_case; stub_all
+run_script -x
+assert_rc 2 "$RC" "-x without -- exits 2"
+assert_grep "needs a command after --" "$CASE_DIR/err" "-x without a command explains itself"
+assert_not_grep "LAUNCH:" "$LOG" "-x without a command does not launch"
+
+new_case; stub_all
+run_script -x --
+assert_rc 2 "$RC" "-x with an empty -- exits 2"
+
+new_case; stub_all
+run_script -x -c -- bash
+assert_rc 2 "$RC" "-x with -c exits 2"
+assert_grep "remote-control configures claude" "$CASE_DIR/err" "-x with -c names the conflict"
+
+new_case; stub_all
+run_script -x --theme dark -- bash
+assert_rc 2 "$RC" "-x with --theme exits 2"
+assert_grep "theme configures claude" "$CASE_DIR/err" "-x with --theme names the conflict"
+
+new_case; stub_all
+export AIRLOCK_CLAUDE_THEME=light
+run_script -x -- bash
+assert_rc 0 "$RC" "the env theme does not block -x"
+assert_not_grep "settings" "$LOG" "the env theme is not passed to the command"
+
+new_case; stub_all; stub_defaults
+run_script -x -- bash
+assert_not_grep "settings" "$LOG" "no theme is detected for -x"
 
 section "theme"
 new_case; stub_all

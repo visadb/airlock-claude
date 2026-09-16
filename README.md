@@ -41,6 +41,21 @@ airlock-claude -M -- -p "run the tests and fix failures"
 The script's own flags stop at the `--`, so a flag `claude` understands never
 has to be known to this script.
 
+With `-x` (or `--exec`), the arguments after `--` don't go to `claude` — they
+*replace* it, becoming the command run in the VM:
+
+```sh
+airlock-claude -x -- bash                       # a sandboxed shell, no claude
+airlock-claude -M -T -x -- python3 -m http.server
+```
+
+Everything else stays the same: the same image, config, network policy and
+session log, and the command still runs inside tmux and under the monitor
+unless `-T` and `-M` turn those off. The claude-only flags — `--theme` and
+`-c`/`--remote-control` — can't be combined with `-x`, and the
+`AIRLOCK_CLAUDE_THEME` variable is ignored, since there's no `claude` for
+them to configure.
+
 Claude Code runs in bypass-permissions mode, which is the point of the
 exercise: the VM is the sandbox, so permission prompts aren't what's keeping
 the session contained. That comes from the image rather than a command-line
@@ -317,7 +332,8 @@ a plain run only builds when the image is missing.
    preset's placeholder token so the interactive login kicks in. A theme,
    given or detected, rides along as `--settings '{"theme":"…"}'`. Arguments
    after `--` on the `airlock-claude` command line are appended to that
-   `claude` command verbatim, after any flags the script adds itself.
+   `claude` command verbatim, after any flags the script adds itself — or,
+   with `-x`, are the whole command in `claude`'s place.
 6. **Session tail** — when `airlock` exits, the last lines of the recorded
    session are printed to stderr with escape sequences stripped, and the
    script exits with `airlock`'s own exit status.

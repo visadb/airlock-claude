@@ -7,6 +7,8 @@ usage() {
 Usage: airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-c|--remote-control]
                       [--theme <theme>] [-r|--rebuild-image] [-h|--help]
                       [-- <claude args...>]
+       airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-r|--rebuild-image]
+                      -x|--exec -- <command...>
 
 Runs Claude Code sandboxed in an airlock VM in the current directory,
 building the sandbox image and generating airlock config as needed.
@@ -42,6 +44,10 @@ pty.dump.previous.
                        claude's own detection can't reach the host terminal
                        from inside the VM. When nothing answers, claude keeps
                        whatever theme it already had.
+  -x, --exec           Run the command given after -- instead of claude,
+                       in the same VM and, by default, the same tmux and
+                       monitor wrappers. The claude-only flags --theme and
+                       -c/--remote-control cannot be combined with it.
   -r, --rebuild-image  Rebuild the sandbox image from scratch, ignoring the
                        layer cache and re-pulling the base image, and drop
                        the local .airlock directory so airlock converts the
@@ -52,11 +58,16 @@ Arguments after -- are passed to claude verbatim:
 
   airlock-claude -- --resume
   airlock-claude -M -- -p "run the tests"
+
+With -x, the arguments after -- replace claude entirely:
+
+  airlock-claude -x -- bash
+  airlock-claude -M -T -x -- python3 -m http.server
 USAGE
 }
 
 parse_args() {
-  REBUILD= MONITOR=1 USE_TMUX=1 REMOTE_CONTROL= THEME= SHOW_USAGE= CLAUDE_ARGS=()
+  REBUILD= MONITOR=1 USE_TMUX=1 REMOTE_CONTROL= THEME= EXEC= SHOW_USAGE= CLAUDE_ARGS=()
   while [[ $# -gt 0 ]]; do
     case $1 in
       --) shift; CLAUDE_ARGS=("$@"); return 0 ;;
@@ -73,6 +84,7 @@ parse_args() {
         THEME=$2
         shift ;;
       --theme=*) THEME=${1#--theme=} ;;
+      -x|--exec) EXEC=1 ;;
       -r|--rebuild-image) REBUILD=1 ;;
       -h|--help) SHOW_USAGE=1; break ;;
       *)
@@ -82,6 +94,22 @@ parse_args() {
     esac
     shift
   done
+}
+
+validate_exec_usage() {
+  local exec_given=$1 remote_control=$2 flag_theme=$3 command_word_count=$4
+  [[ -n $exec_given ]] || return 0
+  if (( command_word_count == 0 )); then
+    echo "airlock-claude: --exec needs a command after --" >&2
+    return 2
+  fi
+  local conflict=
+  [[ -n $remote_control ]] && conflict=--remote-control
+  [[ -n $flag_theme ]] && conflict=--theme
+  if [[ -n $conflict ]]; then
+    echo "airlock-claude: $conflict configures claude, which --exec replaces" >&2
+    return 2
+  fi
 }
 
 require_airlock() {
@@ -429,9 +457,13 @@ print_pty_dump_tail() {
 parse_args "$@" || exit $?
 [[ -n $SHOW_USAGE ]] && { usage; exit 0; }
 
+validate_exec_usage "$EXEC" "$REMOTE_CONTROL" "$THEME" "${#CLAUDE_ARGS[@]}" || exit $?
+
 require_airlock || exit 1
 
-THEME=$(resolve_theme "$THEME" "${AIRLOCK_CLAUDE_THEME:-}" "${COLORFGBG:-}") || exit 2
+if [[ -z $EXEC ]]; then
+  THEME=$(resolve_theme "$THEME" "${AIRLOCK_CLAUDE_THEME:-}" "${COLORFGBG:-}") || exit 2
+fi
 
 CONTAINER_ENGINE=$(pick_container_engine) || exit 1
 if [[ $CONTAINER_ENGINE == podman ]]; then
@@ -449,7 +481,16 @@ export HOME
 
 keep_previous_pty_dump .airlock/sandbox/pty.dump
 
-AIRLOCK_PTY_DUMP=1 airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} ${REMOTE_CONTROL:+env -u CLAUDE_CODE_OAUTH_TOKEN} claude ${THEME:+--settings "{\"theme\":\"$THEME\"}"} ${REMOTE_CONTROL:+--remote-control} "${CLAUDE_ARGS[@]}"
+if [[ -n $EXEC ]]; then
+  SESSION_COMMAND=("${CLAUDE_ARGS[@]}")
+else
+  SESSION_COMMAND=(${REMOTE_CONTROL:+env -u CLAUDE_CODE_OAUTH_TOKEN} claude)
+  [[ -n $THEME ]] && SESSION_COMMAND+=(--settings "{\"theme\":\"$THEME\"}")
+  [[ -n $REMOTE_CONTROL ]] && SESSION_COMMAND+=(--remote-control)
+  SESSION_COMMAND+=("${CLAUDE_ARGS[@]}")
+fi
+
+AIRLOCK_PTY_DUMP=1 airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} "${SESSION_COMMAND[@]}"
 AIRLOCK_EXIT=$?
 
 print_pty_dump_tail .airlock/sandbox/pty.dump 15 >&2
