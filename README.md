@@ -135,6 +135,31 @@ To run without the monitor:
 airlock-claude -M        # or --no-monitor
 ```
 
+### The session log
+
+Both the monitor TUI and tmux restore the host screen when they exit, so the
+session's final words — a crash message, the last thing Claude Code printed —
+vanish with it. To keep them reachable, every run records the session's whole
+terminal stream (stdout and stderr, merged as the pty carries them) to
+`.airlock/sandbox/pty.dump`, and when `airlock` exits, the last lines of that
+stream are printed again, with the terminal escape sequences stripped:
+
+```
+airlock-claude: last session output (whole log: .airlock/sandbox/pty.dump):
+  ...
+  [exited]
+```
+
+The recording is `airlock`'s own pty dump (the script launches it with
+`AIRLOCK_PTY_DUMP=1`), so it's the raw byte stream a terminal would have
+received — replayable, greppable, and growing for the life of the session.
+`airlock` truncates it at every start, so the script first sets the previous
+run's log aside as `.airlock/sandbox/pty.dump.previous`; one run back is kept,
+older ones are gone. Like the rest of `.airlock/`, both files are removed by
+`-r` and are never committed. The reprinted tail goes to stderr, so `-p`
+scripting via stdout stays clean; an `airlock` too old to know
+`AIRLOCK_PTY_DUMP` simply records nothing, and nothing is printed.
+
 ### Remote control
 
 Normally no login happens in the sandbox at all: `airlock`'s `claude-code`
@@ -277,8 +302,11 @@ a plain run only builds when the image is missing.
    is repointed at that root, putting it on the same filesystem as the state
    being linked into.
 5. **Launch** — runs
-   `airlock start --monitor -- tmux -u new-session -A -s claude claude`,
-   handing off to `airlock` to start the VM and run Claude Code inside it.
+   `AIRLOCK_PTY_DUMP=1 airlock start --monitor -- tmux -u new-session -A -s claude claude`,
+   handing off to `airlock` to start the VM and run Claude Code inside it;
+   the environment variable makes `airlock` record the session to
+   `.airlock/sandbox/pty.dump` (the previous run's recording having been set
+   aside as `pty.dump.previous` first).
    No permission flag appears here: the image's
    `/etc/claude-code/managed-settings.json` already puts the session in
    bypass-permissions mode, and `/etc/claude-code/CLAUDE.md` beside it is the
@@ -290,6 +318,9 @@ a plain run only builds when the image is missing.
    given or detected, rides along as `--settings '{"theme":"…"}'`. Arguments
    after `--` on the `airlock-claude` command line are appended to that
    `claude` command verbatim, after any flags the script adds itself.
+6. **Session tail** — when `airlock` exits, the last lines of the recorded
+   session are printed to stderr with escape sequences stripped, and the
+   script exits with `airlock`'s own exit status.
 
 `airlock.local.toml` is regenerated (overwritten) on every run and is not
 meant to be hand-edited or committed. `airlock` keeps the VM disk it converts

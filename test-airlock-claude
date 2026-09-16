@@ -62,7 +62,7 @@ assert_absent() {
 
 TOOLS=$TMPROOT/tools
 mkdir -p "$TOOLS"
-for t in sed tail cat rm chmod mkdir ls; do
+for t in sed tail cat rm chmod mkdir ls tr mv; do
   p=$(command -v "$t") || { echo "required tool not found: $t" >&2; exit 1; }
   ln -s "$p" "$TOOLS/$t"
 done
@@ -78,6 +78,7 @@ new_case() {
   : > "$LOG"
   export LOG CASE_DIR
   export STUB_IMAGE_MISSING= STUB_BUILD_FAILS= DF_MODE=root PROBE_DOCKER= DUMP_ARGV=
+  export STUB_PTY_DUMP= STUB_EXIT=
   export DEFAULTS_MODE=dark
   unset AIRLOCK_CLAUDE_SKIP_UPDATE AIRLOCK_CLAUDE_THEME COLORFGBG
   RC=0
@@ -116,7 +117,12 @@ if [ -n "${PROBE_DOCKER:-}" ]; then
   echo "SHIM_PATH: $(command -v docker)" >> "$LOG"
   docker probe-from-airlock
 fi
-exit 0
+echo "LAUNCH_PTY_DUMP: ${AIRLOCK_PTY_DUMP:-unset}" >> "$LOG"
+if [ -n "${STUB_PTY_DUMP:-}" ]; then
+  mkdir -p .airlock/sandbox
+  printf '%b' "$STUB_PTY_DUMP" > .airlock/sandbox/pty.dump
+fi
+exit "${STUB_EXIT:-0}"
 EOF
   chmod +x "$BIN/airlock"
 }
@@ -198,6 +204,7 @@ assert_grep "Usage: airlock-claude" "$CASE_DIR/out" "--help prints usage to stdo
 assert_grep "remote-control" "$CASE_DIR/out" "--help documents --remote-control"
 assert_grep "passed to claude verbatim" "$CASE_DIR/out" "--help documents -- forwarding"
 assert_grep "--theme <theme>" "$CASE_DIR/out" "--help documents --theme"
+assert_grep "pty.dump" "$CASE_DIR/out" "--help documents the session log"
 assert_not_grep "LAUNCH:" "$LOG" "--help does not launch"
 
 new_case; stub_all
@@ -572,6 +579,54 @@ new_case; stub_all
 export DF_MODE=header_only
 run_script
 assert_eq "LAUNCH_HOME: $FAKE_HOME" "$(grep '^LAUNCH_HOME:' "$LOG")" "empty df answer leaves HOME alone"
+
+section "session log"
+new_case; stub_all
+run_script
+assert_grep "LAUNCH_PTY_DUMP: 1" "$LOG" "launch asks airlock to dump the session pty"
+assert_not_grep "last session output" "$CASE_DIR/err" "no dump means no tail"
+
+new_case; stub_all
+export STUB_PTY_DUMP='plain first line\r\n\0033]0;title\0007\0033[1mbold\0033[0m styled line\r\n'
+run_script
+assert_grep "last session output" "$CASE_DIR/err" "a dump is followed by its tail"
+assert_grep ".airlock/sandbox/pty.dump" "$CASE_DIR/err" "the tail names the whole log"
+assert_grep "plain first line" "$CASE_DIR/err" "dump text reaches the tail"
+assert_grep "bold styled line" "$CASE_DIR/err" "escape sequences are stripped from around the text"
+assert_not_grep "$(printf '\033')" "$CASE_DIR/err" "no raw escape bytes reach the terminal"
+assert_not_grep "last session output" "$CASE_DIR/out" "the tail goes to stderr, keeping stdout clean for -p"
+
+new_case; stub_all
+NUMBERED=''
+i=1
+while [ "$i" -le 20 ]; do NUMBERED="${NUMBERED}numbered line $i\r\n"; i=$((i + 1)); done
+export STUB_PTY_DUMP=$NUMBERED
+run_script
+assert_grep "numbered line 20" "$CASE_DIR/err" "the tail ends at the last line of the dump"
+assert_grep "numbered line 6" "$CASE_DIR/err" "the tail reaches 15 lines back"
+assert_not_grep "numbered line 5\$" "$CASE_DIR/err" "the tail stops at 15 lines"
+
+new_case; stub_all
+export STUB_PTY_DUMP='overwritten frame\rfinal frame\r\n'
+run_script
+assert_grep "final frame" "$CASE_DIR/err" "the last carriage-return overwrite survives"
+assert_not_grep "framefinal frame" "$CASE_DIR/err" "overwritten frames are not glued together"
+
+new_case; stub_all
+export STUB_EXIT=7 STUB_PTY_DUMP='session died\r\n'
+run_script
+assert_rc 7 "$RC" "airlock's exit status is preserved past the tail"
+assert_grep "session died" "$CASE_DIR/err" "the tail still prints when airlock fails"
+
+new_case; stub_all
+mkdir -p "$WORK/.airlock/sandbox"
+printf 'earlier session\n' > "$WORK/.airlock/sandbox/pty.dump"
+export STUB_PTY_DUMP='current session\r\n'
+run_script
+assert_grep "earlier session" "$WORK/.airlock/sandbox/pty.dump.previous" "the previous run's log is kept"
+assert_grep "current session" "$WORK/.airlock/sandbox/pty.dump" "the new run's log replaces it"
+assert_grep "current session" "$CASE_DIR/err" "the tail shows the new run"
+assert_not_grep "earlier session" "$CASE_DIR/err" "the rotated log stays out of the tail"
 
 printf '\n%s\n' "----------------------------------------"
 printf '%d passed, %d failed\n' "$PASSED" "$FAILED"

@@ -46,6 +46,9 @@ build_image_if_needed <engine> <rebuild>        $IMAGE from an inline Dockerfile
 drop_vm_cache_on_rebuild <rebuild>
 generate_airlock_config <skip_update> <remote_control>  writes airlock.local.toml
 home_on_working_filesystem <current_home>   -> the HOME to run airlock with
+keep_previous_pty_dump <dump>               sets last run's log aside as <dump>.previous
+    (the airlock start line — the handoff)
+print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-stripped
 ```
 
 - Keep new steps as functions in that same defined-in-call-order shape.
@@ -72,7 +75,8 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
   the script carries on regardless. Every step is written to be safe to
   capture.
 - The main sequence owns all remaining script state — `CONTAINER_ENGINE`,
-  `SHIM_DIR`, `HOME`, `THEME` — assigned from the values the steps return; the
+  `SHIM_DIR`, `HOME`, `THEME`, `AIRLOCK_EXIT` — assigned from the values the
+  steps return; the
   option globals (`REBUILD`, `MONITOR`, `USE_TMUX`, `REMOTE_CONTROL`, `THEME`,
   `SHOW_USAGE`) are assigned by `parse_args` itself, per the exemption above.
   `THEME` appears in both lists the way `HOME` does: `parse_args` seeds it
@@ -89,7 +93,11 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
   `--help` exited from inside the loop.
 - The `airlock start` line is deliberately *not* in a function — it's the
   handoff, and keeping it at top level means "what does this script ultimately
-  run?" is answered by the last line.
+  run?" is answered by reading it. It is no longer the literal last line: its
+  exit status is captured into `AIRLOCK_EXIT`, the session tail is printed,
+  and the explicit `exit "$AIRLOCK_EXIT"` hands airlock's status through as
+  the script's own — anything added after the launch must not become the
+  exit status the caller sees.
 - The `${MONITOR:+--monitor}`, `${USE_TMUX:+tmux -u new-session -A -s claude}`,
   `${REMOTE_CONTROL:+...}` and `${THEME:+...}` expansions on that line are
   **unquoted on purpose**: an empty one has to disappear entirely rather than
@@ -195,6 +203,41 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
   previous run left in the directory, or on its own defaults, and the
   deny-by-default policy this script exists to impose would silently not be the
   one in effect.
+- **`AIRLOCK_PTY_DUMP=1` is an env prefix on the launch line, not an `[env]`
+  entry.** It is read by the airlock CLI itself on the host
+  (`pty_dump_file` in `app/airlock-cli/src/cli/cmd_start.rs`), which then
+  writes every byte of the guest session's pty — stdout and stderr events
+  both — to `.airlock/sandbox/pty.dump`. Putting it in `[env]` would only
+  forward it into the VM, where nothing reads it. An airlock predating the
+  variable ignores it, so the wrapper degrades to recording nothing and
+  printing nothing.
+- **`keep_previous_pty_dump` runs immediately before the launch** because
+  airlock opens the dump with `truncate(true)` at every start — without the
+  rotation, relaunching destroys exactly the log a bad exit made you want.
+  One `.previous` generation is kept; the move is best-effort, and a failure
+  only means airlock truncates in place as before.
+- **`print_pty_dump_tail` runs after `airlock start` returns, and the call
+  site sends it to stderr.** After, because the monitor TUI and tmux restore
+  the host screen on exit, taking the session's final output with them — this
+  is the whole feature. Stderr for the same reason the image wrapper's update
+  output uses it: `claude -p` stdout must stay clean for scripting. A missing
+  or empty dump prints nothing at all: airlock only opens the dump after the
+  VM boots, so anything that failed earlier already printed its error to the
+  terminal normally, and a header with no content under it would be noise.
+- **`strip_terminal_escapes` is best-effort text recovery, not a terminal
+  emulator.** The dump is the raw pty stream, tmux redraws included. CR is
+  turned into LF first so overprinted lines (spinners, progress) land as
+  separate lines with the final state last; then OSC (BEL- or ST-terminated),
+  DCS/SOS/PM/APC, CSI, charset-select and remaining two-byte ESC sequences
+  are stripped, in that order — the two-byte catchall must come last or it
+  would eat the introducer of a longer sequence and leave its payload behind.
+  A final `tr` deletes what's left of the control set except LF and TAB;
+  `LC_ALL=C` throughout keeps sed and tr byte-oriented so UTF-8 (Claude
+  Code's borders) passes through untouched and NULs can't truncate BSD sed
+  lines (they are deleted first). `tail -c 65536` in the caller bounds the
+  work — after a long session the dump can be very large, and only the last
+  lines are wanted. Reconstructing the true final screen would need vt100
+  emulation, which is exactly the moving part this stays away from.
 - **`home_on_working_filesystem` echoes back the `HOME` it was given unless
   `df` produced something that looks like an absolute path**, because
   `df --output` is GNU-only — BSD `df` rejects it, so a Mac without coreutils'

@@ -13,6 +13,12 @@ building the sandbox image and generating airlock config as needed.
 
 The session runs inside tmux, under airlock's monitor TUI, by default.
 
+When the session ends, the last lines of its output are printed again —
+the monitor and tmux restore the host screen on exit, taking the session's
+final words with them — and the whole terminal log of the run is kept in
+.airlock/sandbox/pty.dump, with the previous run's log beside it as
+pty.dump.previous.
+
   -M, --no-monitor     Run without the monitor TUI, handing the host terminal
                        straight to the session.
   -m, --monitor        Run under the monitor TUI (the default).
@@ -389,6 +395,37 @@ home_on_working_filesystem() {
   fi
 }
 
+keep_previous_pty_dump() {
+  local dump=$1
+  if [[ -s $dump ]]; then
+    mv -f "$dump" "$dump.previous"
+  fi
+}
+
+strip_terminal_escapes() {
+  local esc=$'\033' bel=$'\007'
+  LC_ALL=C tr -d '\000' \
+    | LC_ALL=C tr '\r' '\n' \
+    | LC_ALL=C sed -E \
+        -e "s/${esc}\][^${bel}${esc}]*(${bel}|${esc}\\\\)?//g" \
+        -e "s/${esc}[PX^_][^${esc}]*(${esc}\\\\)?//g" \
+        -e "s/${esc}\[[^@-~]*[@-~]//g" \
+        -e "s/${esc}[()][0-9A-Za-z]//g" \
+        -e "s/${esc}.//g" \
+    | LC_ALL=C tr -d '\001-\010\013\014\016-\037\177'
+}
+
+print_pty_dump_tail() {
+  local dump=$1 max_lines=$2
+  [[ -s $dump ]] || return 0
+  local last_lines
+  last_lines=$(tail -c 65536 "$dump" | strip_terminal_escapes \
+    | LC_ALL=C sed -e 's/[[:space:]]*$//' -e '/^$/d' | tail -n "$max_lines")
+  [[ -n $last_lines ]] || return 0
+  printf 'airlock-claude: last session output (whole log: %s):\n' "$dump"
+  printf '%s\n' "$last_lines" | sed 's/^/  /'
+}
+
 parse_args "$@" || exit $?
 [[ -n $SHOW_USAGE ]] && { usage; exit 0; }
 
@@ -410,4 +447,10 @@ generate_airlock_config "${AIRLOCK_CLAUDE_SKIP_UPDATE:-}" "$REMOTE_CONTROL" || e
 HOME=$(home_on_working_filesystem "$HOME") || exit 1
 export HOME
 
-airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} ${REMOTE_CONTROL:+env -u CLAUDE_CODE_OAUTH_TOKEN} claude ${THEME:+--settings "{\"theme\":\"$THEME\"}"} ${REMOTE_CONTROL:+--remote-control} "${CLAUDE_ARGS[@]}"
+keep_previous_pty_dump .airlock/sandbox/pty.dump
+
+AIRLOCK_PTY_DUMP=1 airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} ${REMOTE_CONTROL:+env -u CLAUDE_CODE_OAUTH_TOKEN} claude ${THEME:+--settings "{\"theme\":\"$THEME\"}"} ${REMOTE_CONTROL:+--remote-control} "${CLAUDE_ARGS[@]}"
+AIRLOCK_EXIT=$?
+
+print_pty_dump_tail .airlock/sandbox/pty.dump 15 >&2
+exit "$AIRLOCK_EXIT"
