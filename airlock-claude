@@ -214,6 +214,16 @@ RUN printf '%s\n' \
       'set -g default-terminal "tmux-256color"' \
       > /etc/tmux.conf
 
+RUN printf '%s\n' \
+      '' \
+      '# airlock-claude: ls conveniences for interactive shells' \
+      'alias ls="ls --color=auto"' \
+      'alias l="ls -CF"' \
+      'alias la="ls -A"' \
+      'alias ll="ls -lh"' \
+      'alias lll="ls -lhA"' \
+      >> /etc/bash.bashrc
+
 ARG GIT_USER_NAME=
 ARG GIT_USER_EMAIL=
 RUN if [ -n "$GIT_USER_NAME" ]; then git config --system user.name "$GIT_USER_NAME"; fi \
