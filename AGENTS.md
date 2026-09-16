@@ -37,7 +37,7 @@ inputs as arguments and hands back its result on stdout, as a data-flow
 diagram too:
 
 ```
-parse_args "$@"                             -> rebuild:monitor:use_tmux:remote_control:show_usage
+parse_args "$@"                             sets REBUILD, MONITOR, USE_TMUX, REMOTE_CONTROL, SHOW_USAGE
 require_airlock                                 before the build, so -r can't spend minutes then fail at the last line
 pick_container_engine                       -> docker | podman
 create_docker_shim                          -> a directory holding a `docker` that runs podman
@@ -54,6 +54,14 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
   When a step needs a value from the environment
   (`AIRLOCK_CLAUDE_SKIP_UPDATE`, `HOME`), the main sequence reads it and passes
   it in.
+- **`parse_args` is the one deliberate exemption from that rule: it sets its
+  option globals directly instead of printing them.** Its output is about to
+  grow an arbitrary-argument array — `CLAUDE_ARGS`, extra arguments after `--`
+  forwarded verbatim to `claude` — and arbitrary user strings can't ride
+  safely through a delimiter-joined stdout channel, while a bash array can't
+  be returned through stdout at all. Setting globals from a function that runs
+  in the main shell is the standard bash idiom for this. It initializes every
+  global it owns on its first line, so the defaults live in the function.
 - **Global constants are the exception: `IMAGE` is used where it's needed
   rather than threaded through arguments.** It never varies, so passing it
   would document nothing and only make the call sites longer.
@@ -62,25 +70,19 @@ home_on_working_filesystem <current_home>   -> the HOME to run airlock with
   inside `$( )` runs in a subshell, where `exit` ends only the subshell and
   the script carries on regardless. Every step is written to be safe to
   capture.
-- The main sequence owns all script state — `REBUILD`, `MONITOR`, `USE_TMUX`,
-  `REMOTE_CONTROL`, `SHOW_USAGE`, `CONTAINER_ENGINE`, `SHIM_DIR`, `HOME` —
-  assigned from the values the steps return.
+- The main sequence owns all remaining script state — `CONTAINER_ENGINE`,
+  `SHIM_DIR`, `HOME` — assigned from the values the steps return; the option
+  globals (`REBUILD`, `MONITOR`, `USE_TMUX`, `REMOTE_CONTROL`, `SHOW_USAGE`)
+  are assigned by `parse_args` itself, per the exemption above.
 - `SHIM_DIR`, the `EXIT` trap that removes it, and the `PATH` that points at it
   are set at top level rather than inside `create_docker_shim`. A trap and an
   export have to be made by the shell that goes on running, and a trap set
   inside a command substitution would fire when that subshell ended — deleting
   the shim before it was ever used.
-- `parse_args` joins its four values with `:` and the caller reads them with
-  `IFS=:`. Colon rather than a space because an unset flag is the empty string,
-  and a whitespace `IFS` makes `read` collapse runs of separators, which would
-  silently shift every field after the empty one. A new flag means a new field
-  in both the `printf` and the `read`.
-- `-h`/`--help` sets `show_usage` and `break`s out; the main sequence is what
-  calls `usage`. `parse_args` can't print it itself — it runs inside `$( )`,
-  so its stdout is the return value and the help text would be captured
-  instead of shown. `break` rather than continuing to parse is what keeps
-  `--help --bogus` exiting 0, as it did when `--help` exited from inside the
-  loop.
+- `-h`/`--help` sets `SHOW_USAGE` and `break`s out; the main sequence is what
+  calls `usage`, keeping `parse_args` pure parsing. `break` rather than
+  continuing to parse is what keeps `--help --bogus` exiting 0, as it did when
+  `--help` exited from inside the loop.
 - The `airlock start` line is deliberately *not* in a function — it's the
   handoff, and keeping it at top level means "what does this script ultimately
   run?" is answered by the last line.

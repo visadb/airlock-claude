@@ -34,16 +34,16 @@ USAGE
 }
 
 parse_args() {
-  local rebuild= monitor=1 use_tmux=1 remote_control= show_usage=
+  REBUILD= MONITOR=1 USE_TMUX=1 REMOTE_CONTROL= SHOW_USAGE=
   while [[ $# -gt 0 ]]; do
     case $1 in
-      -m|--monitor) monitor=1 ;;
-      -M|--no-monitor) monitor= ;;
-      -t|--tmux) use_tmux=1 ;;
-      -T|--no-tmux) use_tmux= ;;
-      -c|--remote-control) remote_control=1 ;;
-      -r|--rebuild-image) rebuild=1 ;;
-      -h|--help) show_usage=1; break ;;
+      -m|--monitor) MONITOR=1 ;;
+      -M|--no-monitor) MONITOR= ;;
+      -t|--tmux) USE_TMUX=1 ;;
+      -T|--no-tmux) USE_TMUX= ;;
+      -c|--remote-control) REMOTE_CONTROL=1 ;;
+      -r|--rebuild-image) REBUILD=1 ;;
+      -h|--help) SHOW_USAGE=1; break ;;
       *)
         echo "airlock-claude: unknown option: $1" >&2
         echo "Try 'airlock-claude --help'." >&2
@@ -51,7 +51,6 @@ parse_args() {
     esac
     shift
   done
-  printf '%s:%s:%s:%s:%s\n' "$rebuild" "$monitor" "$use_tmux" "$remote_control" "$show_usage"
 }
 
 require_airlock() {
@@ -256,8 +255,7 @@ home_on_working_filesystem() {
   fi
 }
 
-OPTIONS=$(parse_args "$@") || exit $?
-IFS=: read -r REBUILD MONITOR USE_TMUX REMOTE_CONTROL SHOW_USAGE <<<"$OPTIONS"
+parse_args "$@" || exit $?
 [[ -n $SHOW_USAGE ]] && { usage; exit 0; }
 
 require_airlock || exit 1
