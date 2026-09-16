@@ -5,9 +5,11 @@ IMAGE=airlock-claude:latest
 usage() {
   cat <<'USAGE'
 Usage: airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-c|--remote-control]
-                      [--theme <theme>] [-r|--rebuild-image] [-h|--help]
+                      [--theme <theme>] [--mount-rw <dir>] [--mount-ro <dir>]
+                      [-r|--rebuild-image] [-h|--help]
                       [-- <claude args...>]
-       airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-r|--rebuild-image]
+       airlock-claude [-M|--no-monitor] [-T|--no-tmux] [--mount-rw <dir>]
+                      [--mount-ro <dir>] [-r|--rebuild-image]
                       -x|--exec -- <command...>
 
 Runs Claude Code sandboxed in an airlock VM in the current directory,
@@ -44,6 +46,14 @@ pty.dump.previous.
                        claude's own detection can't reach the host terminal
                        from inside the VM. When nothing answers, claude keeps
                        whatever theme it already had.
+  --mount-rw <dir>     Mount another host directory into the VM, read-write,
+                       under the project directory as its basename — e.g.
+                       --mount-rw ../other-project appears as ./other-project
+                       in the session. Repeatable. Lets related projects sit
+                       next to this one on the host instead of being copied
+                       into it.
+  --mount-ro <dir>     Like --mount-rw, but read-only: the session can read
+                       and build against the directory but not change it.
   -x, --exec           Run the command given after -- instead of claude,
                        in the same VM and, by default, the same tmux and
                        monitor wrappers. The claude-only flags --theme and
@@ -68,6 +78,7 @@ USAGE
 
 parse_args() {
   REBUILD= MONITOR=1 USE_TMUX=1 REMOTE_CONTROL= THEME= EXEC= SHOW_USAGE= CLAUDE_ARGS=()
+  MOUNTS_RW=() MOUNTS_RO=()
   while [[ $# -gt 0 ]]; do
     case $1 in
       --) shift; CLAUDE_ARGS=("$@"); return 0 ;;
@@ -84,6 +95,15 @@ parse_args() {
         THEME=$2
         shift ;;
       --theme=*) THEME=${1#--theme=} ;;
+      --mount-rw|--mount-ro)
+        if [[ $# -lt 2 ]]; then
+          echo "airlock-claude: $1 needs a directory" >&2
+          return 2
+        fi
+        if [[ $1 == --mount-rw ]]; then MOUNTS_RW+=("$2"); else MOUNTS_RO+=("$2"); fi
+        shift ;;
+      --mount-rw=*) MOUNTS_RW+=("${1#--mount-rw=}") ;;
+      --mount-ro=*) MOUNTS_RO+=("${1#--mount-ro=}") ;;
       -x|--exec) EXEC=1 ;;
       -r|--rebuild-image) REBUILD=1 ;;
       -h|--help) SHOW_USAGE=1; break ;;
@@ -201,6 +221,69 @@ resolve_theme() {
   theme_from_macos_appearance && return 0
   theme_from_colorfgbg "$colorfgbg" && return 0
   return 0
+}
+
+resolve_extra_mount() {
+  local flag=$1 dir=$2 read_only=$3
+  local source target existing
+  if [[ -z $dir ]]; then
+    echo "airlock-claude: $flag needs a directory" >&2
+    return 2
+  fi
+  if [[ ! -d $dir ]]; then
+    echo "airlock-claude: $flag: not a directory: $dir" >&2
+    return 2
+  fi
+  source=$(CDPATH= cd -- "$dir" 2>/dev/null && pwd) || {
+    echo "airlock-claude: $flag: cannot resolve: $dir" >&2
+    return 2
+  }
+  if [[ $source == "$PWD" ]]; then
+    echo "airlock-claude: $flag: $dir is the project directory, which is always mounted" >&2
+    return 2
+  fi
+  target=${source##*/}
+  if [[ -z $target ]]; then
+    echo "airlock-claude: $flag: cannot mount the filesystem root" >&2
+    return 2
+  fi
+  for existing in ${MOUNT_TARGETS[@]+"${MOUNT_TARGETS[@]}"}; do
+    if [[ $existing == "$target" ]]; then
+      echo "airlock-claude: two mounts would both appear as ./$target; rename one on the host" >&2
+      return 2
+    fi
+  done
+  MOUNT_SOURCES+=("$source")
+  MOUNT_TARGETS+=("$target")
+  MOUNT_READ_ONLY+=("$read_only")
+}
+
+resolve_extra_mounts() {
+  MOUNT_SOURCES=() MOUNT_TARGETS=() MOUNT_READ_ONLY=()
+  local dir
+  for dir in ${MOUNTS_RW[@]+"${MOUNTS_RW[@]}"}; do
+    resolve_extra_mount --mount-rw "$dir" false || return $?
+  done
+  for dir in ${MOUNTS_RO[@]+"${MOUNTS_RO[@]}"}; do
+    resolve_extra_mount --mount-ro "$dir" true || return $?
+  done
+}
+
+toml_escaped() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '%s\n' "$s"
+}
+
+extra_mounts_toml() {
+  local i source target
+  for ((i = 0; i < ${#MOUNT_SOURCES[@]}; i++)); do
+    source=$(toml_escaped "${MOUNT_SOURCES[i]}")
+    target=$(toml_escaped "${MOUNT_TARGETS[i]}")
+    printf '\n[mounts."%s"]\nsource = "%s"\ntarget = "%s"\nread_only = %s\n' \
+      "$target" "$source" "$target" "${MOUNT_READ_ONLY[i]}"
+  done
 }
 
 pick_container_engine() {
@@ -376,7 +459,7 @@ drop_vm_cache_on_rebuild() {
 }
 
 generate_airlock_config() {
-  local skip_update=$1 remote_control=$2
+  local skip_update=$1 remote_control=$2 extra_mounts=$3
   local skip_update_line=
   if [[ -n $skip_update ]]; then
     skip_update_line='AIRLOCK_CLAUDE_SKIP_UPDATE = "1"'
@@ -401,6 +484,7 @@ resolution = "docker"
 DISABLE_AUTOUPDATER = "1"
 $skip_update_line
 $token_middleware_override
+$extra_mounts
 EOF
   then
     echo "airlock-claude: could not write airlock.local.toml in $PWD" >&2
@@ -465,6 +549,8 @@ if [[ -z $EXEC ]]; then
   THEME=$(resolve_theme "$THEME" "${AIRLOCK_CLAUDE_THEME:-}" "${COLORFGBG:-}") || exit 2
 fi
 
+resolve_extra_mounts || exit $?
+
 CONTAINER_ENGINE=$(pick_container_engine) || exit 1
 if [[ $CONTAINER_ENGINE == podman ]]; then
   SHIM_DIR=$(create_docker_shim) || exit 1
@@ -474,7 +560,7 @@ fi
 
 build_image_if_needed "$CONTAINER_ENGINE" "$REBUILD" || exit 1
 drop_vm_cache_on_rebuild "$REBUILD"
-generate_airlock_config "${AIRLOCK_CLAUDE_SKIP_UPDATE:-}" "$REMOTE_CONTROL" || exit 1
+generate_airlock_config "${AIRLOCK_CLAUDE_SKIP_UPDATE:-}" "$REMOTE_CONTROL" "$(extra_mounts_toml)" || exit 1
 
 HOME=$(home_on_working_filesystem "$HOME") || exit 1
 export HOME

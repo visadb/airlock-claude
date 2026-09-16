@@ -205,6 +205,8 @@ assert_grep "remote-control" "$CASE_DIR/out" "--help documents --remote-control"
 assert_grep "passed to claude verbatim" "$CASE_DIR/out" "--help documents -- forwarding"
 assert_grep "--theme <theme>" "$CASE_DIR/out" "--help documents --theme"
 assert_grep "\-x, --exec" "$CASE_DIR/out" "--help documents --exec"
+assert_grep "\--mount-rw <dir>" "$CASE_DIR/out" "--help documents --mount-rw"
+assert_grep "\--mount-ro <dir>" "$CASE_DIR/out" "--help documents --mount-ro"
 assert_grep "pty.dump" "$CASE_DIR/out" "--help documents the session log"
 assert_not_grep "LAUNCH:" "$LOG" "--help does not launch"
 
@@ -297,6 +299,96 @@ run_script
 assert_rc 1 "$RC" "unwritable config exits 1"
 assert_grep "could not write airlock.local.toml" "$CASE_DIR/err" "unwritable config says so"
 assert_not_grep "LAUNCH:" "$LOG" "unwritable config does not launch"
+
+section "extra mounts"
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 0 "$RC" "--mount-rw with a directory exits 0"
+assert_grep '^\[mounts."other"\]$' "$(CONFIG)" "--mount-rw adds a mounts table named after the directory"
+assert_grep "^source = \"$CASE_DIR/other\"\$" "$(CONFIG)" "the mount's source is the host directory"
+assert_grep '^target = "other"$' "$(CONFIG)" "the mount's target is the basename, relative to the project"
+assert_grep '^read_only = false$' "$(CONFIG)" "--mount-rw mounts read-write"
+assert_grep "^LAUNCH:" "$LOG" "--mount-rw still launches"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/reference"
+run_script --mount-ro "$CASE_DIR/reference"
+assert_grep '^\[mounts."reference"\]$' "$(CONFIG)" "--mount-ro adds a mounts table"
+assert_grep '^read_only = true$' "$(CONFIG)" "--mount-ro mounts read-only"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/one" "$CASE_DIR/two" "$CASE_DIR/three"
+run_script --mount-rw "$CASE_DIR/one" --mount-rw "$CASE_DIR/two" --mount-ro "$CASE_DIR/three"
+assert_grep '^\[mounts."one"\]$' "$(CONFIG)" "the flags are repeatable (first)"
+assert_grep '^\[mounts."two"\]$' "$(CONFIG)" "the flags are repeatable (second)"
+assert_grep '^\[mounts."three"\]$' "$(CONFIG)" "read-write and read-only mounts combine"
+assert_eq "false
+false
+true" "$(sed -n 's/^read_only = //p' "$(CONFIG)")" "each mount keeps its own mode"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/joined"
+run_script --mount-ro="$CASE_DIR/joined"
+assert_grep '^\[mounts."joined"\]$' "$(CONFIG)" "--mount-ro=dir is the joined form"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/sibling"
+run_script --mount-rw ../sibling
+assert_grep "^source = \"$CASE_DIR/sibling\"\$" "$(CONFIG)" "a relative directory is resolved to its host path"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/with space" "$CASE_DIR/"'qu"ote'
+run_script --mount-rw "$CASE_DIR/with space" --mount-ro "$CASE_DIR/"'qu"ote'
+assert_grep '^\[mounts."with space"\]$' "$(CONFIG)" "a name with a space stays one TOML key"
+assert_grep '^\[mounts."qu\\"ote"\]$' "$(CONFIG)" "a double quote in the name is escaped in the key"
+assert_grep 'source = ".*qu\\"ote"' "$(CONFIG)" "a double quote in the path is escaped in the source"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+export AIRLOCK_CLAUDE_SKIP_UPDATE=1
+run_script -c --mount-rw "$CASE_DIR/other"
+awk '/^\[env\]/{f=1;next} /^\[/{f=0} f' "$(CONFIG)" > "$CASE_DIR/env-table"
+assert_grep "AIRLOCK_CLAUDE_SKIP_UPDATE" "$CASE_DIR/env-table" \
+  "mount tables come after [env], leaving its entries inside it"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+run_script --mount-ro "$CASE_DIR/other" -x -- bash
+assert_rc 0 "$RC" "mounts combine with -x"
+assert_grep '^\[mounts."other"\]$' "$(CONFIG)" "the mount reaches the config with -x"
+
+new_case; stub_all
+run_script --mount-rw
+assert_rc 2 "$RC" "--mount-rw without a value exits 2"
+assert_grep "needs a directory" "$CASE_DIR/err" "missing mount value explains itself"
+
+new_case; stub_all
+run_script --mount-ro "$CASE_DIR/does-not-exist"
+assert_rc 2 "$RC" "a nonexistent mount directory exits 2"
+assert_grep "not a directory" "$CASE_DIR/err" "a nonexistent mount directory explains itself"
+assert_absent "$(CONFIG)" "a bad mount writes no config"
+assert_not_grep "LAUNCH:" "$LOG" "a bad mount does not launch"
+
+new_case; stub_all
+touch "$CASE_DIR/plain-file"
+run_script --mount-rw "$CASE_DIR/plain-file"
+assert_rc 2 "$RC" "a file as a mount source exits 2"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/a/same" "$CASE_DIR/b/same"
+run_script --mount-rw "$CASE_DIR/a/same" --mount-ro "$CASE_DIR/b/same"
+assert_rc 2 "$RC" "two mounts with one basename exit 2"
+assert_grep "both appear as ./same" "$CASE_DIR/err" "the basename collision is named"
+
+new_case; stub_all
+run_script --mount-rw .
+assert_rc 2 "$RC" "mounting the project directory itself exits 2"
+assert_grep "always mounted" "$CASE_DIR/err" "the project-directory mount explains itself"
+
+new_case; stub_all
+run_script --mount-ro /
+assert_rc 2 "$RC" "mounting the filesystem root exits 2"
 
 section "launch"
 new_case; stub_all
