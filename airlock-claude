@@ -106,7 +106,7 @@ FROM python:3.14-slim
 RUN DEBIAN_FRONTEND=noninteractive apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates git curl ripgrep jq less procps unzip openssh-client \
-      tmux locales ncurses-term \
+      tmux locales ncurses-term vim \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall ncurses-base \
  && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen \
  && locale-gen \

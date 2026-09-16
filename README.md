@@ -26,7 +26,7 @@ airlock-claude
 That's it — no per-project setup required. The first run in any environment
 builds a local `airlock-claude:latest` image (a minimal `python:3.14-slim`
 base with `git`, `curl`, `ripgrep`, `jq`, `less`, `procps`, `unzip`,
-`openssh-client`, `tmux`, and `locales`, plus Claude Code itself); every run
+`openssh-client`, `tmux`, `locales`, and `vim`, plus Claude Code itself); every run
 after that reuses it.
 Each invocation writes a fresh `airlock.local.toml` for the current directory
 and starts Claude Code inside an `airlock` VM.
