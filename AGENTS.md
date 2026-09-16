@@ -316,6 +316,30 @@ Things that aren't visible from the script at all:
   command line, so on the rare path where a previous session is still alive,
   a changed host theme (like any changed `claude` flag) waits for the next
   fresh session.
+- **Claude Code's `theme=auto` always resolves dark inside the VM, and no
+  config can change that** — verified against claude 2.1.273 and tmux 3.5a
+  by running each under a scripted pty. Auto detection is one OSC 11
+  background query (`ESC ] 11 ; ? ESC \`, observed ~0.3s after launch)
+  answered with `rgb:RRRR/GGGG/BBBB`; when no answer arrives, dark is the
+  default. Inside the VM no answer can arrive: tmux neither forwards an
+  application's OSC 11 query to its outer terminal nor answers it from what
+  it knows — tested with the outer terminal answering tmux's own background
+  query (tmux does ask at attach, then never shares the answer) and with an
+  explicit `window-style bg=`, both ignored — and on the `-T` path the query
+  stops at airlock's monitor pty instead. Nor is there another way to hand
+  claude the answer: no env variable or settings key carries a background
+  colour (a `CLAUDE_THEME` env var is an open upstream request,
+  anthropics/claude-code#10074). A query-answering pty shim inside the image
+  was considered and rejected: to answer it would need the host's background
+  colour — everything `resolve_theme` already does — plus a new moving part
+  in the image. That dead end is why the theme is resolved on the host at
+  all. If tmux ever answers OSC 11 on behalf of its client, or the monitor
+  passes queries through, auto would work end-to-end and `resolve_theme`
+  could go. One unresolved observation from the same harness: claude's
+  onboarding theme picker rendered byte-identically whether the query was
+  answered light, dark, or not at all — the reply was consumed but never
+  changed the UI, and the logged-in REPL wasn't reachable headless, so auto
+  may be dark-pinned in more places than tmux.
 - **The `HOME` redirect exists because `airlock` hardlinks files out of `HOME`**
   into its per-directory state, and a hardlink can't cross a filesystem
   boundary. btrfs subvolumes are the case that surprises people: one mount, but
