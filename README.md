@@ -1,24 +1,19 @@
 # airlock-claude
 
-Run Claude Code sandboxed in `airlock`, in any directory, with zero manual
-setup. Copy this one script anywhere on your `PATH` and it builds whatever it
-needs, generates the `airlock` config for you, and drops you into a Claude
-Code session with network access denied by default — no image to hand-build,
-no config to hand-write.
+Run Claude Code sandboxed in
+[airlock](https://github.com/milankinen/airlock), in any directory, with
+zero manual setup. Copy this one script anywhere on your `PATH`; it builds
+the sandbox image, generates the `airlock` config, and drops you into a
+Claude Code session with network access denied by default.
 
 ## Prerequisites
 
 - `docker` or `podman` (used to build the sandbox VM image)
-- `airlock` (the sandboxing CLI that starts the VM)
+- [`airlock`](https://github.com/milankinen/airlock) (the sandboxing CLI
+  that starts the VM)
 - a `CLAUDE_CODE_OAUTH_TOKEN` on the host — in the environment or in
-  `airlock`'s secret vault — unless you log in interactively with `-c`
-
-Your host `~/.claude` stays on the host: the VM gets its own, persisted
-between runs under `~/.airlock/claude`. No login happens in the sandbox
-either — `airlock`'s `claude-code` preset authenticates the session
-with your host `CLAUDE_CODE_OAUTH_TOKEN`, injected at the host boundary
-without ever entering the VM (see [Remote control](#remote-control) for
-the details and the exception).
+  `airlock`'s secret vault; `claude setup-token` on the host generates
+  one — unless you log in interactively with `-c`
 
 ## Usage
 
@@ -28,328 +23,85 @@ From any directory you want to work in:
 airlock-claude
 ```
 
-That's it — no per-project setup required. The first run in any environment
-builds a local `airlock-claude:latest` image (a minimal `python:3.14-slim`
-base with `git`, `curl`, `ripgrep`, `jq`, `less`, `procps`, `unzip`,
-`openssh-client`, `tmux`, `locales`, and `vim`, plus Claude Code itself); every run
-after that reuses it.
-Each invocation writes a fresh `airlock.local.toml` for the current directory
-and starts Claude Code inside an `airlock` VM.
+The first run builds a local `airlock-claude:latest` image (a minimal
+`python:3.14-slim` base with `git`, `curl`, `ripgrep`, `tmux`, `vim` and
+friends, plus Claude Code itself); later runs reuse it, and Claude Code
+updates itself at startup so a new release needs no rebuild
+(`AIRLOCK_CLAUDE_SKIP_UPDATE=1` skips the check).
 
-Anything after `--` is passed to `claude` unchanged:
+The session runs in bypass-permissions mode — the VM is the sandbox, so
+permission prompts aren't what's keeping it contained — with network access
+denied by default: the Claude API and the `apt`/`pip` mirrors are reachable,
+nothing else unless you allow it.
+
+Anything after `--` is passed to `claude` unchanged; with `-x`, it *replaces*
+`claude` as the command run in the VM:
 
 ```sh
 airlock-claude -- --resume
 airlock-claude -M -- -p "run the tests and fix failures"
+airlock-claude -x -- bash               # a sandboxed shell, no claude
 ```
 
-The script's own flags stop at the `--`, so a flag `claude` understands never
-has to be known to this script.
+### Flags
 
-With `-x` (or `--exec`), the arguments after `--` don't go to `claude` — they
-*replace* it, becoming the command run in the VM:
+- `-T`, `--no-tmux` — run `claude` directly instead of inside tmux.
+- `-M`, `--no-monitor` — skip `airlock`'s monitor TUI, which shows the
+  network policy at work.
+- `--mount-rw <dir>`, `--mount-ro <dir>` — bring other host directories
+  into the sandbox, read-write or read-only (repeatable; see below).
+- `--theme <t>` — pick claude's colour theme (`dark`, `light`, `auto`, …).
+  Without it (or the `AIRLOCK_CLAUDE_THEME` variable), the theme is detected
+  from the host terminal, since claude's own detection can't see your
+  terminal from inside the VM; either way it applies per launch, without
+  touching your persisted settings.
+- `-c`, `--remote-control` — run with a real interactive login (see
+  **Login** below).
+- `-x`, `--exec` — run the command after `--` in place of `claude`. The
+  claude-only flags (`--theme`, `-c`) don't combine with it.
+- `-r`, `--rebuild-image` — rebuild the image from scratch, to pick up newer
+  base packages or a changed host git identity (both are baked in at build
+  time). Takes minutes; a plain run only builds when the image is missing.
 
-```sh
-airlock-claude -x -- bash                       # a sandboxed shell, no claude
-airlock-claude -M -T -x -- python3 -m http.server
-```
+## Things to know
 
-Everything else stays the same: the same image, config, network policy and
-session log, and the command still runs inside tmux and under the monitor
-unless `-T` and `-M` turn those off. The claude-only flags — `--theme` and
-`-c`/`--remote-control` — can't be combined with `-x`, and the
-`AIRLOCK_CLAUDE_THEME` variable is ignored, since there's no `claude` for
-them to configure.
+**tmux.** The session runs inside tmux, with mouse and copy-to-host-clipboard
+working out of the box, so you can split a pane and have a shell next to
+Claude Code without leaving the sandbox. Detaching (`prefix+d`) doesn't leave a session to come back
+to — the tmux client is what `airlock` waits on, so detaching stops the VM.
 
-Other directories can be brought into the sandbox alongside the project, so
-a related repo can stay where it lives on the host instead of being copied
-into the project directory:
+**Login.** Your host `~/.claude` stays on the host; the VM gets its own,
+persisted between runs under `~/.airlock/claude`. No login happens in the
+sandbox: `airlock`'s `claude-code` preset injects your
+`CLAUDE_CODE_OAUTH_TOKEN` into API requests at the host boundary, so the
+token never enters the VM. The exception is `-c`, which claude's
+`--remote-control` requires: it turns off the injection and has you log in
+for real, persisting that login under `~/.airlock/claude` for later `-c`
+runs — with the trade-off that those credentials live inside the sandbox.
 
-```sh
-airlock-claude --mount-rw ../other-project --mount-ro ~/src/reference-lib
-```
+**Session log.** Every run records the session's raw terminal stream to
+`.airlock/sandbox/pty.dump` (one previous run is kept as
+`pty.dump.previous`), and when `airlock` exits the last lines are reprinted,
+escape-stripped — the monitor and tmux restore the host screen on exit and
+would otherwise take a crash's final words with them. The tail goes to
+stderr, so `-p` output on stdout stays clean.
 
-Each mounted directory appears inside the VM under the project directory,
-named after its basename — the examples above become `./other-project` and
-`./reference-lib` in the session. `--mount-rw` shares the directory
-read-write, so changes made in the sandbox land in the real directory on the
-host; `--mount-ro` shares it read-only, for code the session should read and
-build against but never modify. Both flags repeat for as many directories as
-needed, work with `-x`, and two mounts can't share a basename — the script
-refuses rather than let one shadow the other.
+**Mounts.** Each `--mount-rw`/`--mount-ro` directory appears in the VM under
+the project directory, named after its basename (two mounts can't share
+one). The mount point is created in the project directory and remains,
+empty, after the session — worth a `.gitignore` entry — and a same-named
+project directory is shadowed for the session, untouched underneath. Mounts
+last only for the run you pass them on.
 
-Two host-side effects to know about. The mount point is created inside the
-project directory if nothing is there yet, and that empty directory remains
-on the host after the session (matching your mounts, ready for the next run —
-but worth a `.gitignore` entry). And if the project already contains a
-directory with the same name, the mount covers it for the session — the VM
-sees the mounted directory, while the one in the project sits untouched
-underneath.
+**Python HTTPS.** Allowed HTTPS traffic is re-signed by `airlock`'s TLS
+proxy, and Python 3.13+ strict certificate checking rejects its certificates
+(`Missing Authority Key Identifier`); `curl`, `git`, `pip` and Node are
+fine. The image's managed `/etc/claude-code/CLAUDE.md` already tells every
+session the per-client workaround, how to recognise a network-policy denial,
+and to leave host-made virtualenvs alone.
 
-The mounts last for the run you pass them on: `airlock.local.toml` is
-regenerated by every invocation, so the next run without the flags comes up
-without the mounts.
+`airlock.local.toml` and `.airlock/` are runtime artifacts — regenerated per
+run and gitignored; don't edit or commit them.
 
-Claude Code runs in bypass-permissions mode, which is the point of the
-exercise: the VM is the sandbox, so permission prompts aren't what's keeping
-the session contained. That comes from the image rather than a command-line
-flag — `/etc/claude-code/managed-settings.json`, Claude Code's system-level
-settings file, sets it — so it holds for any `claude` started inside the VM,
-not just the one this script launches. Network access is denied by default, apart from what `airlock`'s
-`claude-code`, `debian`, and `python` presets allow — enough for Claude Code
-to reach the API and its own update endpoint, and for `apt` and `pip` to reach
-their package mirrors, and nothing else unless you say so.
-
-### Updates
-
-Claude Code updates itself at startup, so you never have to rebuild the image
-just to pick up a new release. Set `AIRLOCK_CLAUDE_SKIP_UPDATE=1` to skip the
-check; if it fails (no network, say), the session simply starts on the version
-already in the image.
-
-### tmux
-
-Claude Code runs inside `tmux`, so the session isn't stuck being one
-full-screen program — you can open a second window or split a pane and have a
-shell next to Claude Code without leaving the sandbox. When Claude Code exits
-the tmux session ends and the VM comes down, exactly as it does without tmux.
-Detaching is the one thing that doesn't behave the way tmux normally does:
-`prefix+d` ends the tmux client, and that client is the process `airlock` is
-waiting on, so detaching stops the VM rather than leaving a session to come
-back to.
-
-To run Claude Code directly instead:
-
-```sh
-airlock-claude -T        # or --no-tmux
-```
-
-`tmux` is configured for the mouse out of the box via `/etc/tmux.conf`, the
-system-level config, so your own `~/.tmux.conf` still overrides it. It sets:
-
-- `mouse on`, so scrolling, pane selection and border-dragging work in tmux
-  itself. This doesn't cost the session its mouse: tmux forwards events to any
-  pane whose program has asked for mouse reporting, so Claude Code and `nvim`
-  inside tmux still get theirs.
-- `set-clipboard on`, plus a `terminal-features` entry asserting OSC 52
-  support for every terminal, so copying in tmux reaches your host clipboard
-  from inside the VM. The entry is needed because tmux only emits OSC 52 for
-  terminals it believes support it, and the host terminal on the far side of
-  the VM isn't something it can recognise.
-- `default-terminal "tmux-256color"`, so starting tmux doesn't drop the
-  session to 8 colours.
-
-The image generates the `en_US.UTF-8` locale and sets `LANG` to it, so
-everything in the VM runs in UTF-8; tmux is started with `-u`, so box-drawing
-characters and anything multi-byte pass through it intact.
-
-One consequence of a named locale rather than `C.UTF-8`: `LANG` sets
-`LC_COLLATE` as well, so `sort`, `ls` and glob ranges use English collation —
-which ignores punctuation and case — instead of byte order. Export
-`LC_COLLATE=C` in the session if you need scripts to sort the C way.
-
-### The monitor TUI
-
-`airlock` wraps the session in a monitor TUI that shows the network policy at
-work. It sits between the host terminal and the VM's pty, reading host input
-itself and forwarding it on — mouse events along with keys, so the session
-keeps its mouse under the monitor: Claude Code scrolls and clicks, and so do
-full-screen programs you start inside the sandbox, `tmux` and `nvim` included.
-
-To run without the monitor:
-
-```sh
-airlock-claude -M        # or --no-monitor
-```
-
-### The session log
-
-Both the monitor TUI and tmux restore the host screen when they exit, so the
-session's final words — a crash message, the last thing Claude Code printed —
-vanish with it. To keep them reachable, every run records the session's whole
-terminal stream (stdout and stderr, merged as the pty carries them) to
-`.airlock/sandbox/pty.dump`, and when `airlock` exits, the last lines of that
-stream are printed again, with the terminal escape sequences stripped:
-
-```
-airlock-claude: last session output (whole log: .airlock/sandbox/pty.dump):
-  ...
-  [exited]
-```
-
-The recording is `airlock`'s own pty dump, so it's the raw byte stream a
-terminal would have received — replayable, greppable, and growing for the life of the session.
-`airlock` truncates it at every start, so the script first sets the previous
-run's log aside as `.airlock/sandbox/pty.dump.previous`; one run back is kept,
-older ones are gone. Like the rest of `.airlock/`, both files are removed by
-`-r` and are never committed. The reprinted tail goes to stderr, so `-p`
-scripting via stdout stays clean.
-
-### Remote control
-
-Normally no login happens in the sandbox at all: `airlock`'s `claude-code`
-preset keeps your real `CLAUDE_CODE_OAUTH_TOKEN` on the host and injects it
-into API requests at the host boundary, so the VM only ever sees a
-placeholder. That's the safest mode — the token can't be stolen from inside
-the sandbox — but Claude Code's `--remote-control` doesn't work on an
-injected token; it needs a real interactive login. To get one:
-
-```sh
-airlock-claude -c        # or --remote-control
-```
-
-`-c` disables the preset's token injection for the run, hides the placeholder
-token from the session, and passes `--remote-control` to `claude`. With no
-token in sight, Claude Code asks you to log in; the login is stored under
-`~/.airlock/claude` on the host (where the preset persists the sandbox's
-`~/.claude`), so later `-c` runs reuse it rather than asking again. The
-trade-off is that in this mode the session's credentials live inside the
-sandbox like any ordinary login.
-
-### The colour theme
-
-Claude Code normally picks dark or light by asking the terminal for its
-background colour, but from inside the VM that question can't reach your
-terminal — it stops at tmux and the VM boundary — so the sandboxed session
-is left guessing. Instead, the theme is settled on the host at launch:
-
-```sh
-airlock-claude --theme light     # or dark, auto, dark-daltonized,
-                                 # light-daltonized, dark-ansi, light-ansi
-```
-
-Without the flag (or the `AIRLOCK_CLAUDE_THEME` environment variable, which
-the flag overrides), the script detects it: it asks the terminal for its
-background colour the same way Claude Code would — an OSC 11 query, which
-most terminals answer, over SSH too — and falls back to the macOS system
-appearance, then to the `COLORFGBG` variable some terminals export. The
-answer is handed to `claude` as a per-launch settings override, which applies
-for that launch without touching your persisted settings: a theme you pick
-by hand inside a session still sticks for the session, and is overridden
-again the next time the script launches one. If nothing on the host gives an
-answer, no flag is passed and claude's own theme setting stands.
-
-The theme is fixed when the VM's tmux session is created; on the rare path
-where a relaunch attaches to a still-running session, a changed host theme
-waits for the next fresh one.
-
-### Python and the TLS proxy
-
-Allowed HTTPS traffic doesn't leave the VM untouched: `airlock` terminates
-TLS at the host, re-signs each host with its own `airlock CA`, and adds that
-CA to the VM's system trust store. `curl`, `git`, `pip` and Node all trust it
-as-is, but every Python HTTPS client — `urllib`, `http.client`, `urllib3`,
-`requests`, `httpx`, `aiohttp` — fails with
-
-```
-CERTIFICATE_VERIFY_FAILED: certificate verify failed: Missing Authority Key Identifier
-```
-
-Python 3.13 turned on `VERIFY_X509_STRICT` by default, and the per-host
-certificates the proxy issues carry no Authority Key Identifier extension,
-which strict checking requires. `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE`
-don't help; the CA is found, the leaf is what's rejected. The workaround is an
-SSL context with strict checking off, passed explicitly to whichever client
-you're using:
-
-```python
-import ssl
-ctx = ssl.create_default_context()
-ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
-urllib.request.urlopen(url, context=ctx)
-```
-
-Claude Code is told all of this — symptom, cause, and the recipe for each
-client — by `/etc/claude-code/CLAUDE.md` in the image, Claude Code's
-managed-policy memory: it's read into every session in the VM and doesn't
-touch your own `~/.claude/CLAUDE.md`. So a sandboxed session that reaches for
-Python `urllib` already knows what the error means and how to get past it.
-
-The same file tells the session what a policy denial looks like — the proxy
-answers a denied HTTP request itself with `403 Forbidden` and the body
-`denied by network policy` — and that you can usually enable non-matching
-traffic interactively and temporarily. So when Claude Code decides network
-access beyond the allowlist matters, it asks you to allow the traffic rather
-than working around the block, and reminds you to revert the policy once the
-part that needed the wider access is done.
-
-The same file also warns Claude Code off virtualenvs it finds in the working
-directory. The directory is shared with the host, so a `.venv` that's already
-there was made by the host's Python, at the host's paths, and won't work in
-the VM; the note says to leave it alone and create a separately named one
-rather than reuse or clobber it.
-
-### Rebuilding the image
-
-To rebuild the sandbox image from scratch — to pick up newer base packages, or
-a git identity you've changed since the image was built — run:
-
-```sh
-airlock-claude -r        # or --rebuild-image
-```
-
-That builds with no layer cache and re-pulls the base image, and removes the
-current directory's `.airlock` so `airlock` converts the new image rather than
-the VM disk it cached from the old one. It takes minutes rather than seconds;
-a plain run only builds when the image is missing.
-
-## How it works
-
-1. **Container engine detection** — prefers `docker`; falls back to `podman`
-   via a temporary `docker`-forwarding shim if `docker` isn't installed, since
-   `airlock` always invokes `docker` directly.
-2. **Sandbox image build** — builds `airlock-claude:latest` if it doesn't
-   already exist locally (or unconditionally, with `-r`), installing Claude
-   Code into it with `https://claude.ai/install.sh`. `claude` on the image's
-   `PATH` is a small wrapper that updates the install in place and then hands
-   off to the real binary, which is why a new release doesn't need an image
-   rebuild. Your git identity is read from the host at build time (the
-   effective `user.name` and `user.email` from `git config --list --includes`)
-   and written to `/etc/gitconfig` in the image, so commits made inside the VM
-   are attributed to you. Since that happens at build time, run
-   `airlock-claude -r` to pick up a changed identity.
-3. **Config generation** — writes `airlock.local.toml` in the current
-   directory, configuring:
-   - `network.policy = "deny-by-default"`, with the `claude-code`, `debian`,
-     and `python` presets
-   - the sandbox VM image to use
-   - `DISABLE_AUTOUPDATER=1` in the VM environment (that only turns off the
-     *background* updater — the startup update still runs)
-   - with `-c`, the preset's token-injecting middleware disabled
-   - a `[mounts.<name>]` entry for each `--mount-rw`/`--mount-ro` directory,
-     with the resolved host path as `source`, the basename as the (relative)
-     `target` — `airlock` resolves it against the guest working directory,
-     i.e. the project directory — and `read_only` set to match the flag
-4. **Home directory adjustment** — `airlock` hardlinks files out of `HOME` into
-   its per-directory state, and a hardlink can't cross a filesystem boundary —
-   including a btrfs subvolume boundary, which isn't a separate mount but is a
-   separate filesystem as far as `link(2)` is concerned. So when the working
-   directory's filesystem root is something other than `/` or `/home`, `HOME`
-   is repointed at that root, putting it on the same filesystem as the state
-   being linked into.
-5. **Launch** — runs
-   `AIRLOCK_PTY_DUMP=1 airlock start --monitor -- tmux -u new-session -A -s claude claude`,
-   handing off to `airlock` to start the VM and run Claude Code inside it;
-   the environment variable makes `airlock` record the session to
-   `.airlock/sandbox/pty.dump` (the previous run's recording having been set
-   aside as `pty.dump.previous` first).
-   No permission flag appears here: the image's
-   `/etc/claude-code/managed-settings.json` already puts the session in
-   bypass-permissions mode, and `/etc/claude-code/CLAUDE.md` beside it is the
-   managed memory every session starts with.
-   `-M` drops `--monitor`; `-T` drops the `tmux` wrapper, leaving `claude`
-   as the command `airlock` runs; `-c` runs claude as
-   `env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control`, stripping the
-   preset's placeholder token so the interactive login kicks in. A theme,
-   given or detected, rides along as `--settings '{"theme":"…"}'`. Arguments
-   after `--` on the `airlock-claude` command line are appended to that
-   `claude` command verbatim, after any flags the script adds itself — or,
-   with `-x`, are the whole command in `claude`'s place.
-6. **Session tail** — when `airlock` exits, the last lines of the recorded
-   session are printed to stderr with escape sequences stripped, and the
-   script exits with `airlock`'s own exit status.
-
-`airlock.local.toml` is regenerated (overwritten) on every run and is not
-meant to be hand-edited or committed. `airlock` keeps the VM disk it converts
-from the image in `.airlock/`, which likewise shouldn't be committed; both are
-gitignored here.
+For everything else — how each step works and why it's shaped the way it
+is — see [AGENTS.md](AGENTS.md).

@@ -247,10 +247,21 @@ print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-
 
 ## The Dockerfile
 
-`README.md` explains the parts a user sees — the `en_US.UTF-8` locale and
-`tmux -u`, the mouse and clipboard settings, and the permission bypass. What
-it doesn't cover:
+`README.md` summarises the user-visible surface (mouse and clipboard in
+tmux, UTF-8, the permission bypass); the reasoning behind it lives here:
 
+- **`/etc/tmux.conf` sets `mouse on`, `set-clipboard on` plus a
+  `terminal-features` entry asserting OSC 52 support for every terminal, and
+  `default-terminal "tmux-256color"`.** It's the system-level config, so it
+  applies whichever user the VM runs as. `mouse on` doesn't cost panes their
+  mouse — tmux
+  forwards events to any pane whose program asked for mouse reporting, so
+  Claude Code and `nvim` keep theirs. The `terminal-features` assertion is
+  needed because tmux only emits OSC 52 (which is what carries a copy to the
+  host clipboard from inside the VM) for terminals it believes support it,
+  and the host terminal on the far side of the VM isn't something it can
+  recognise. `default-terminal` keeps the session from dropping to 8
+  colours.
 - **`DEBIAN_FRONTEND` is scoped to the `RUN` command** rather than set as an
   `ENV`, so it doesn't follow the image into the session. `locales` is the one
   package here with anything to ask.
@@ -265,6 +276,10 @@ it doesn't cover:
   was confirmed to fix the rendering; `LANG` fixes the locale itself, which
   everything else in the VM reads too (the base image sets no `LANG` at all,
   leaving the VM in the POSIX locale).
+- **A named locale rather than `C.UTF-8` has a collation cost.** `LANG` sets
+  `LC_COLLATE` too, so `sort`, `ls` and glob ranges use English collation —
+  which ignores punctuation and case — instead of byte order; exporting
+  `LC_COLLATE=C` in the session restores C sorting.
 - **`ncurses-base` is reinstalled immediately after `ncurses-term`.**
   `ncurses-term` is there for the Alacritty terminfo entries (`alacritty`,
   `alacritty+common`, `alacritty-direct`), but installing it on this image
@@ -333,8 +348,8 @@ Things that aren't visible from the script at all:
   line runs `claude` with no permission flag; what puts the session in
   `bypassPermissions` mode is `/etc/claude-code/managed-settings.json`, written
   by the Dockerfile. Same reasoning as `/etc/gitconfig` and `/etc/tmux.conf` —
-  it applies whichever user the VM runs as, and being outside `HOME` it isn't
-  displaced when `airlock` populates the VM's home from the host's — except
+  it applies whichever user the VM runs as, and being outside `HOME` it's
+  clear of what the preset mounts into the VM's home — except
   that managed settings are the *highest*-precedence source, so a host
   `~/.claude/settings.json` can't override it. The consequence for the launcher
   is that an image built before this existed starts with prompts on, and `-r`
