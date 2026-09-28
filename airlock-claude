@@ -26,9 +26,7 @@ pty.dump.previous.
   -M, --no-monitor     Run without the monitor TUI, handing the host terminal
                        straight to the session.
   -m, --monitor        Run under the monitor TUI (the default).
-  -T, --no-tmux        Run claude directly instead of inside tmux. Also the
-                       way out if the image predates tmux — rebuild with -r
-                       to get it.
+  -T, --no-tmux        Run claude directly instead of inside tmux.
   -t, --tmux           Run inside tmux (the default).
   -c, --remote-control Run claude with --remote-control. Turns off the
                        preset's OAuth token injection and hides its

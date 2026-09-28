@@ -10,10 +10,15 @@ no config to hand-write.
 
 - `docker` or `podman` (used to build the sandbox VM image)
 - `airlock` (the sandboxing CLI that starts the VM)
+- a `CLAUDE_CODE_OAUTH_TOKEN` on the host — in the environment or in
+  `airlock`'s secret vault — unless you log in interactively with `-c`
 
-You don't need Claude Code installed on the host — it's installed into the
-sandbox image, so this works the same on macOS and Linux. Your host `~/.claude`
-is carried into the VM, so an existing login carries over.
+Your host `~/.claude` stays on the host: the VM gets its own, persisted
+between runs under `~/.airlock/claude`. No login happens in the sandbox
+either — `airlock`'s `claude-code` preset authenticates the session
+with your host `CLAUDE_CODE_OAUTH_TOKEN`, injected at the host boundary
+without ever entering the VM (see [Remote control](#remote-control) for
+the details and the exception).
 
 ## Usage
 
@@ -89,15 +94,11 @@ Claude Code runs in bypass-permissions mode, which is the point of the
 exercise: the VM is the sandbox, so permission prompts aren't what's keeping
 the session contained. That comes from the image rather than a command-line
 flag — `/etc/claude-code/managed-settings.json`, Claude Code's system-level
-settings file, sets `permissions.defaultMode` to `bypassPermissions` — so it
-holds for any `claude` started inside the VM, not just the one this script
-launches. Network access is denied by default, apart from what `airlock`'s
+settings file, sets it — so it holds for any `claude` started inside the VM,
+not just the one this script launches. Network access is denied by default, apart from what `airlock`'s
 `claude-code`, `debian`, and `python` presets allow — enough for Claude Code
 to reach the API and its own update endpoint, and for `apt` and `pip` to reach
 their package mirrors, and nothing else unless you say so.
-
-An image built before that setting existed starts with prompts on instead;
-rebuild it with `-r`.
 
 ### Updates
 
@@ -123,9 +124,8 @@ To run Claude Code directly instead:
 airlock-claude -T        # or --no-tmux
 ```
 
-`tmux` is configured for the mouse out of the box via `/etc/tmux.conf` —
-tmux's system-level config, so it applies whichever user the VM runs as, and
-your own `~/.tmux.conf` still overrides it. It sets:
+`tmux` is configured for the mouse out of the box via `/etc/tmux.conf`, the
+system-level config, so your own `~/.tmux.conf` still overrides it. It sets:
 
 - `mouse on`, so scrolling, pane selection and border-dragging work in tmux
   itself. This doesn't cost the session its mouse: tmux forwards events to any
@@ -139,39 +139,22 @@ your own `~/.tmux.conf` still overrides it. It sets:
 - `default-terminal "tmux-256color"`, so starting tmux doesn't drop the
   session to 8 colours.
 
-The image generates `en_US.UTF-8` at build time — the `locales` package plus a
-one-line `/etc/locale.gen`, so exactly that locale is built and nothing else —
-sets `LANG` to it, and starts tmux with `-u`. The last two say
-the same thing twice on purpose. The base image sets no `LANG` at all, which
-leaves the VM in the POSIX locale, and tmux decides whether its terminal is
-UTF-8 by reading `LC_ALL`/`LC_CTYPE`/`LANG`. A tmux that concludes "not UTF-8"
-rewrites the box-drawing characters passing through it into VT100 ACS escapes
-and mangles anything multi-byte — so Claude Code's borders arrive as `q` and
-`x` and its crab comes out broken, even though Claude Code emitted perfectly
-good UTF-8. `-u` makes tmux's output UTF-8 regardless of that check, and is
-what was confirmed to fix the rendering; `LANG` fixes the locale itself, which
-everything else in the VM reads too.
+The image generates the `en_US.UTF-8` locale and sets `LANG` to it, so
+everything in the VM runs in UTF-8; tmux is started with `-u`, so box-drawing
+characters and anything multi-byte pass through it intact.
 
 One consequence of a named locale rather than `C.UTF-8`: `LANG` sets
 `LC_COLLATE` as well, so `sort`, `ls` and glob ranges use English collation —
 which ignores punctuation and case — instead of byte order. Export
 `LC_COLLATE=C` in the session if you need scripts to sort the C way.
 
-If your `airlock-claude:latest` image was built before `tmux` was added to it,
-the launch fails with `tmux: command not found` — a plain run only builds when
-the image is missing, so an existing image is never refreshed on its own. Run
-`airlock-claude -r` once to rebuild with `tmux` in it, or `-T` to carry on
-without.
-
 ### The monitor TUI
 
 `airlock` wraps the session in a monitor TUI that shows the network policy at
 work. It sits between the host terminal and the VM's pty, reading host input
-itself and forwarding it on. Current `airlock` forwards mouse events along with
-keys, so the session keeps its mouse under the monitor — Claude Code scrolls
-and clicks, and so do full-screen programs you start inside the sandbox, `tmux`
-and `nvim` included. Older `airlock` forwarded keys only; if the mouse is dead
-in your session, that's the thing to check first.
+itself and forwarding it on — mouse events along with keys, so the session
+keeps its mouse under the monitor: Claude Code scrolls and clicks, and so do
+full-screen programs you start inside the sandbox, `tmux` and `nvim` included.
 
 To run without the monitor:
 
@@ -194,15 +177,13 @@ airlock-claude: last session output (whole log: .airlock/sandbox/pty.dump):
   [exited]
 ```
 
-The recording is `airlock`'s own pty dump (the script launches it with
-`AIRLOCK_PTY_DUMP=1`), so it's the raw byte stream a terminal would have
-received — replayable, greppable, and growing for the life of the session.
+The recording is `airlock`'s own pty dump, so it's the raw byte stream a
+terminal would have received — replayable, greppable, and growing for the life of the session.
 `airlock` truncates it at every start, so the script first sets the previous
 run's log aside as `.airlock/sandbox/pty.dump.previous`; one run back is kept,
 older ones are gone. Like the rest of `.airlock/`, both files are removed by
 `-r` and are never committed. The reprinted tail goes to stderr, so `-p`
-scripting via stdout stays clean; an `airlock` too old to know
-`AIRLOCK_PTY_DUMP` simply records nothing, and nothing is printed.
+scripting via stdout stays clean.
 
 ### Remote control
 
@@ -242,7 +223,7 @@ the flag overrides), the script detects it: it asks the terminal for its
 background colour the same way Claude Code would — an OSC 11 query, which
 most terminals answer, over SSH too — and falls back to the macOS system
 appearance, then to the `COLORFGBG` variable some terminals export. The
-answer is handed to `claude` as `--settings '{"theme":"…"}'`, which applies
+answer is handed to `claude` as a per-launch settings override, which applies
 for that launch without touching your persisted settings: a theme you pick
 by hand inside a session still sticks for the session, and is overridden
 again the next time the script launches one. If nothing on the host gives an
@@ -279,11 +260,10 @@ urllib.request.urlopen(url, context=ctx)
 ```
 
 Claude Code is told all of this — symptom, cause, and the recipe for each
-client — by `/etc/claude-code/CLAUDE.md` in the image. That's Claude Code's
-managed-policy memory: it sits next to `managed-settings.json`, is read into
-every session on the machine whichever user runs it, and doesn't touch your
-own `~/.claude/CLAUDE.md`. So a sandboxed session that reaches for Python
-`urllib` already knows what the error means and how to get past it.
+client — by `/etc/claude-code/CLAUDE.md` in the image, Claude Code's
+managed-policy memory: it's read into every session in the VM and doesn't
+touch your own `~/.claude/CLAUDE.md`. So a sandboxed session that reaches for
+Python `urllib` already knows what the error means and how to get past it.
 
 The same file tells the session what a policy denial looks like — the proxy
 answers a denied HTTP request itself with `403 Forbidden` and the body
@@ -298,8 +278,6 @@ directory. The directory is shared with the host, so a `.venv` that's already
 there was made by the host's Python, at the host's paths, and won't work in
 the VM; the note says to leave it alone and create a separately named one
 rather than reuse or clobber it.
-
-An image built before this file existed doesn't have it; rebuild with `-r`.
 
 ### Rebuilding the image
 

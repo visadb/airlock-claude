@@ -256,6 +256,15 @@ it doesn't cover:
   package here with anything to ask.
 - **`/etc/locale.gen` is overwritten, not appended to**, so exactly one locale
   is built.
+- **`LANG=en_US.UTF-8` and tmux's `-u` flag are deliberately redundant; don't
+  drop either on the grounds that the other covers it.** tmux decides whether
+  its terminal is UTF-8 by reading `LC_ALL`/`LC_CTYPE`/`LANG`, and a tmux that
+  concludes "not UTF-8" rewrites box-drawing characters into VT100 ACS escapes
+  and mangles anything multi-byte — Claude Code's borders arrive as `q` and
+  `x`. `-u` forces tmux's output to UTF-8 regardless of that check and is what
+  was confirmed to fix the rendering; `LANG` fixes the locale itself, which
+  everything else in the VM reads too (the base image sets no `LANG` at all,
+  leaving the VM in the POSIX locale).
 - **`ncurses-base` is reinstalled immediately after `ncurses-term`.**
   `ncurses-term` is there for the Alacritty terminfo entries (`alacritty`,
   `alacritty+common`, `alacritty-direct`), but installing it on this image
