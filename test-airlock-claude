@@ -66,7 +66,6 @@ for t in sed tail cat rm chmod mkdir ls tr mv; do
   p=$(command -v "$t") || { echo "required tool not found: $t" >&2; exit 1; }
   ln -s "$p" "$TOOLS/$t"
 done
-p=$(command -v mktemp) && ln -s "$p" "$TOOLS/mktemp"
 
 new_case() {
   CASE_DIR=$(mktemp -d "$TMPROOT/case.XXXXXX")
@@ -78,10 +77,12 @@ new_case() {
   mkdir -p "$BIN" "$WORK" "$FAKE_HOME"
   : > "$LOG"
   export LOG CASE_DIR STUB_BOX
-  export STUB_IMAGE_MISSING= STUB_BUILD_FAILS= PROBE_DOCKER= DUMP_ARGV=
+  export STUB_IMAGE_MISSING= STUB_BUILD_FAILS= DUMP_ARGV=
   export STUB_PTY_DUMP= STUB_EXIT= STUB_REMOVE_EXIT= STUB_NO_SANDBOX=
+  export STUB_GIT_NAME='Stub Name' STUB_GIT_EMAIL=stub@example.com
   export DEFAULTS_MODE=dark
   unset AIRLOCK_CLAUDE_SKIP_UPDATE AIRLOCK_CLAUDE_THEME COLORFGBG
+  unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
   RC=0
 }
 
@@ -126,10 +127,6 @@ echo "LAUNCH: $*" >> "$LOG"
 if [ -n "${DUMP_ARGV:-}" ]; then
   for arg; do echo "ARGV[$arg]" >> "$LOG"; done
 fi
-if [ -n "${PROBE_DOCKER:-}" ]; then
-  echo "SHIM_PATH: $(command -v docker)" >> "$LOG"
-  docker probe-from-airlock
-fi
 echo "LAUNCH_PTY_DUMP: ${AIRLOCK_PTY_DUMP:-unset}" >> "$LOG"
 if [ -n "${STUB_PTY_DUMP:-}" ]; then
   mkdir -p "$STUB_BOX"
@@ -143,11 +140,11 @@ EOF
 stub_git() {
   cat > "$BIN/git" <<'EOF'
 #!/bin/sh
-if [ "$1" = config ] && [ "$2" = --list ]; then
-  printf 'user.name=Lower Precedence Name\n'
-  printf 'user.email=lower-precedence@example.com\n'
-  printf 'user.name=Higher Precedence Name\n'
-  printf 'user.email=higher-precedence@example.com\n'
+if [ "$1" = config ] && [ "$2" = --get ]; then
+  case "$3" in
+    user.name) [ -n "${STUB_GIT_NAME:-}" ] && echo "$STUB_GIT_NAME" ;;
+    user.email) [ -n "${STUB_GIT_EMAIL:-}" ] && echo "$STUB_GIT_EMAIL" ;;
+  esac
   exit 0
 fi
 exit 0
@@ -199,13 +196,13 @@ new_case; stub_all
 run_script --help
 assert_rc 0 "$RC" "--help exits 0"
 assert_grep "Usage: airlock-claude" "$CASE_DIR/out" "--help prints usage to stdout"
-assert_grep "remote-control" "$CASE_DIR/out" "--help documents --remote-control"
 assert_grep "passed to claude verbatim" "$CASE_DIR/out" "--help documents -- forwarding"
 assert_grep "--theme <theme>" "$CASE_DIR/out" "--help documents --theme"
 assert_grep "\-x, --exec" "$CASE_DIR/out" "--help documents --exec"
 assert_grep "\--mount-rw <dir>" "$CASE_DIR/out" "--help documents --mount-rw"
 assert_grep "\--mount-ro <dir>" "$CASE_DIR/out" "--help documents --mount-ro"
 assert_grep "pty.dump" "$CASE_DIR/out" "--help documents the session log"
+assert_grep "airlock info" "$CASE_DIR/out" "--help says where to find the sandbox directory the log is in"
 assert_not_grep "LAUNCH:" "$LOG" "--help does not launch"
 
 new_case; stub_all
@@ -266,19 +263,14 @@ assert_grep 'policy = "deny-by-default"' "$(CONFIG)" "config denies network by d
 assert_grep 'name = "airlock-claude:latest"' "$(CONFIG)" "config points at the built image"
 assert_grep 'DISABLE_AUTOUPDATER = "1"' "$(CONFIG)" "config disables the background autoupdater"
 assert_not_grep "AIRLOCK_CLAUDE_SKIP_UPDATE" "$(CONFIG)" "opt-out absent when unset on the host"
-assert_not_grep "middleware" "$(CONFIG)" "token middleware left enabled without -c"
-
-new_case; stub_all
-run_script -c
-assert_grep '\[network\.middleware\.claude-auth-token\]' "$(CONFIG)" "-c names the preset's token middleware"
-assert_grep 'enabled = false' "$(CONFIG)" "-c disables the token middleware"
-
-new_case; stub_all
-export AIRLOCK_CLAUDE_SKIP_UPDATE=1
-run_script -c
+assert_grep '^resolution = "docker"$' "$(CONFIG)" "config names the engine that built the image"
+assert_grep '^anthropic = true$' "$(CONFIG)" "config turns on airlock's anthropic sign-in service"
+assert_eq "[network.services]" "$(grep -B1 '^anthropic = true$' "$(CONFIG)" | head -1)" \
+  "the service sits in its own [network.services] table"
 awk '/^\[env\]/{f=1;next} /^\[/{f=0} f' "$(CONFIG)" > "$CASE_DIR/env-table"
-assert_grep "AIRLOCK_CLAUDE_SKIP_UPDATE" "$CASE_DIR/env-table" \
-  "opt-out stays inside [env] when -c adds a table below it"
+assert_grep '^CLAUDE_CODE_OAUTH_TOKEN = { optional = true }$' "$CASE_DIR/env-table" \
+  "a missing host token no longer stops the start, so /login in the sandbox can take its place"
+assert_not_grep "middleware" "$(CONFIG)" "config adds no middleware of its own"
 
 new_case; stub_all
 export AIRLOCK_CLAUDE_SKIP_UPDATE=1
@@ -293,6 +285,33 @@ run_script
 assert_rc 1 "$RC" "unwritable config exits 1"
 assert_grep "could not write airlock.local.toml" "$CASE_DIR/err" "unwritable config says so"
 assert_not_grep "LAUNCH:" "$LOG" "unwritable config does not launch"
+
+section "git identity"
+new_case; stub_all
+run_script
+awk '/^\[env\]/{f=1;next} /^\[/{f=0} f' "$(CONFIG)" > "$CASE_DIR/env-table"
+assert_grep '^GIT_AUTHOR_NAME = "Stub Name"$' "$CASE_DIR/env-table" "the host's user.name becomes the author name, inside [env]"
+assert_grep '^GIT_AUTHOR_EMAIL = "stub@example.com"$' "$CASE_DIR/env-table" "the host's user.email becomes the author email"
+assert_grep '^GIT_COMMITTER_NAME = "Stub Name"$' "$CASE_DIR/env-table" "the committer name follows user.name too"
+assert_grep '^GIT_COMMITTER_EMAIL = "stub@example.com"$' "$CASE_DIR/env-table" "the committer email follows user.email too"
+
+new_case; stub_all
+export GIT_AUTHOR_NAME="Env Author"
+run_script
+assert_grep '^GIT_AUTHOR_NAME = "Env Author"$' "$(CONFIG)" "a GIT_AUTHOR_NAME set on the host wins over user.name"
+assert_grep '^GIT_COMMITTER_NAME = "Stub Name"$' "$(CONFIG)" "the committer name still falls back to user.name"
+
+new_case; stub_all
+export STUB_GIT_NAME= STUB_GIT_EMAIL=
+run_script
+assert_rc 0 "$RC" "a host without a git identity still launches"
+assert_not_grep "GIT_" "$(CONFIG)" "no host identity means no identity lines"
+
+new_case; stub_all
+export STUB_GIT_NAME='Jo "Dollar" $HOME\slash'
+run_script
+assert_eq 'GIT_AUTHOR_NAME = "Jo \"Dollar\" \\$HOME\\\\slash"' "$(grep '^GIT_AUTHOR_NAME' "$(CONFIG)")" \
+  "quotes, dollars and backslashes survive both TOML and airlock's template syntax"
 
 section "extra mounts"
 new_case; stub_all
@@ -341,7 +360,7 @@ assert_grep 'source = ".*qu\\"ote"' "$(CONFIG)" "a double quote in the path is e
 new_case; stub_all
 mkdir -p "$CASE_DIR/other"
 export AIRLOCK_CLAUDE_SKIP_UPDATE=1
-run_script -c --mount-rw "$CASE_DIR/other"
+run_script --mount-rw "$CASE_DIR/other"
 awk '/^\[env\]/{f=1;next} /^\[/{f=0} f' "$(CONFIG)" > "$CASE_DIR/env-table"
 assert_grep "AIRLOCK_CLAUDE_SKIP_UPDATE" "$CASE_DIR/env-table" \
   "mount tables come after [env], leaving its entries inside it"
@@ -390,7 +409,6 @@ run_script
 assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude" \
   "$(grep '^LAUNCH:' "$LOG")" "launch argv is exact"
 assert_not_grep "dangerously-skip-permissions" "$LOG" "launch passes no permission flag"
-assert_not_grep "remote-control" "$LOG" "launch passes --remote-control only on request"
 
 new_case; stub_all
 run_script --monitor
@@ -425,20 +443,6 @@ assert_eq "LAUNCH: start -- claude" \
   "$(grep '^LAUNCH:' "$LOG")" "-M and -T together strip both wrappers"
 
 new_case; stub_all
-run_script --remote-control
-assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control" \
-  "$(grep '^LAUNCH:' "$LOG")" "--remote-control clears the token from claude's env and passes the flag"
-
-new_case; stub_all
-run_script -c
-assert_grep "remote-control" "$LOG" "-c is the short form"
-
-new_case; stub_all
-run_script -T -c
-assert_eq "LAUNCH: start --monitor -- env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control" \
-  "$(grep '^LAUNCH:' "$LOG")" "-c without tmux still clears the token"
-
-new_case; stub_all
 run_script -- --resume
 assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude --resume" \
   "$(grep '^LAUNCH:' "$LOG")" "arguments after -- reach claude"
@@ -454,11 +458,6 @@ run_script -M -T -- -p "multi word prompt"
 assert_eq "LAUNCH: start -- claude -p multi word prompt" \
   "$(grep '^LAUNCH:' "$LOG")" "forwarded arguments combine with wrapper flags"
 assert_grep 'ARGV\[multi word prompt\]' "$LOG" "a multi-word argument survives as one word"
-
-new_case; stub_all
-run_script -T -c -- --resume
-assert_eq "LAUNCH: start --monitor -- env -u CLAUDE_CODE_OAUTH_TOKEN claude --remote-control --resume" \
-  "$(grep '^LAUNCH:' "$LOG")" "forwarded arguments come after the flags -c adds"
 
 section "exec"
 new_case; stub_all
@@ -484,11 +483,6 @@ assert_not_grep "LAUNCH:" "$LOG" "-x without a command does not launch"
 new_case; stub_all
 run_script -x --
 assert_rc 2 "$RC" "-x with an empty -- exits 2"
-
-new_case; stub_all
-run_script -x -c -- bash
-assert_rc 2 "$RC" "-x with -c exits 2"
-assert_grep "remote-control configures claude" "$CASE_DIR/err" "-x with -c names the conflict"
 
 new_case; stub_all
 run_script -x --theme dark -- bash
@@ -521,9 +515,9 @@ run_script --theme=light
 assert_grep '{"theme":"light"}' "$LOG" "--theme=value is the joined form"
 
 new_case; stub_all
-run_script -T -c --theme dark -- --resume
-assert_eq 'LAUNCH: start --monitor -- env -u CLAUDE_CODE_OAUTH_TOKEN claude --settings {"theme":"dark"} --remote-control --resume' \
-  "$(grep '^LAUNCH:' "$LOG")" "the theme comes before the flags -c adds and the forwarded arguments"
+run_script -T --theme dark -- --resume
+assert_eq 'LAUNCH: start --monitor -- claude --settings {"theme":"dark"} --resume' \
+  "$(grep '^LAUNCH:' "$LOG")" "the theme comes before the forwarded arguments"
 
 new_case; stub_all
 run_script --theme purple
@@ -595,6 +589,7 @@ export STUB_IMAGE_MISSING=1
 run_script
 assert_grep "BUILD(docker)" "$LOG" "missing image triggers a build"
 assert_not_grep "no-cache" "$LOG" "implicit build keeps the layer cache"
+assert_not_grep "build-arg" "$LOG" "the build bakes nothing host-specific into the image"
 
 new_case; stub_all
 run_script -r
@@ -606,12 +601,6 @@ export STUB_IMAGE_MISSING=1 STUB_BUILD_FAILS=1
 run_script
 assert_rc 1 "$RC" "failed build exits 1"
 assert_not_grep "LAUNCH:" "$LOG" "failed build does not launch"
-
-new_case; stub_all
-export STUB_IMAGE_MISSING=1
-run_script
-assert_grep "GIT_USER_NAME=Higher Precedence Name" "$LOG" "build takes the last user.name"
-assert_grep "GIT_USER_EMAIL=higher-precedence@example.com" "$LOG" "build takes the last user.email"
 
 section "generated Dockerfile"
 new_case; stub_all
@@ -674,15 +663,7 @@ else
 fi
 assert_grep "etc/tmux.conf" "$CASE_DIR/Dockerfile" "Dockerfile writes the system tmux config"
 assert_grep "set -g mouse on" "$CASE_DIR/Dockerfile" "system tmux config turns the mouse on"
-assert_eq "$(grep -n 'ARG GIT_USER_NAME' "$CASE_DIR/Dockerfile" | cut -d: -f1)" \
-  "$(awk '/^ARG GIT_USER_NAME/{print NR}' "$CASE_DIR/Dockerfile")" "ARG pair is locatable"
-install_line=$(awk '/claude.ai\/install.sh/{print NR; exit}' "$CASE_DIR/Dockerfile")
-arg_line=$(awk '/^ARG GIT_USER_NAME/{print NR; exit}' "$CASE_DIR/Dockerfile")
-if [ "$arg_line" -gt "$install_line" ]; then
-  pass "git identity stays below the cached install layer"
-else
-  fail "git identity stays below the cached install layer" "ARG at $arg_line, install at $install_line"
-fi
+assert_not_grep "git config" "$CASE_DIR/Dockerfile" "the image carries no git identity"
 
 section "sandbox removal on rebuild"
 new_case; stub_all
@@ -706,18 +687,14 @@ run_script -r
 assert_rc 1 "$RC" "a failed removal exits 1"
 assert_not_grep "^LAUNCH:" "$LOG" "a failed removal does not launch on the old sandbox"
 
-section "podman fallback"
+section "podman"
 new_case; stub_all_but_docker
-export PROBE_DOCKER=1
+export STUB_IMAGE_MISSING=1
 run_script
 assert_rc 0 "$RC" "podman-only host launches"
-assert_grep "podman REACHED: probe-from-airlock" "$LOG" "shimmed docker forwards to podman"
-shim=$(sed -n 's/^SHIM_PATH: //p' "$LOG")
-case $shim in
-  */airlock-claude.*/docker) pass "shim uses an explicit mktemp template" ;;
-  *) fail "shim uses an explicit mktemp template" "shim path was [$shim]" ;;
-esac
-assert_absent "$(dirname "$shim")" "shim directory is removed on exit"
+assert_grep "BUILD(podman)" "$LOG" "podman builds the image"
+assert_grep '^resolution = "podman"$' "$(CONFIG)" "config tells airlock to resolve the image from podman"
+assert_not_grep "docker" "$(CONFIG)" "docker is not mentioned to airlock on a podman host"
 
 section "session log"
 new_case; stub_all

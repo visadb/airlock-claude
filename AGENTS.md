@@ -39,14 +39,14 @@ inputs as arguments and hands back its result on stdout, as a data-flow
 diagram too:
 
 ```
-parse_args "$@"                             sets REBUILD, MONITOR, USE_TMUX, REMOTE_CONTROL, THEME, SHOW_USAGE, CLAUDE_ARGS
+parse_args "$@"                             sets REBUILD, MONITOR, USE_TMUX, THEME, SHOW_USAGE, CLAUDE_ARGS
 require_airlock                                 before the build, so -r can't spend minutes then fail at the last line
 resolve_theme <flag_theme> <env_theme> <colorfgbg>  -> theme for claude's --settings, or nothing
 pick_container_engine                       -> docker | podman
-create_docker_shim                          -> a directory holding a `docker` that runs podman
 build_image_if_needed <engine> <rebuild>        $IMAGE from an inline Dockerfile
 remove_sandbox_on_rebuild <rebuild>         `airlock remove --force`, so the new image gets a new sandbox
-generate_airlock_config <skip_update> <remote_control>  writes airlock.local.toml
+git_identity_env <author_name> <author_email> <committer_name> <committer_email>  -> [env] lines for the host's git identity, or nothing
+generate_airlock_config <engine> <skip_update> <git_identity> <extra_mounts>  writes airlock.local.toml
 sandbox_dir                                 -> the sandbox directory `airlock info` reports, or nothing
 keep_previous_pty_dump <dump>               sets last run's log aside as <dump>.previous
     (the airlock start line — the handoff)
@@ -77,18 +77,13 @@ print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-
   the script carries on regardless. Every step is written to be safe to
   capture.
 - The main sequence owns all remaining script state — `CONTAINER_ENGINE`,
-  `SHIM_DIR`, `THEME`, `SANDBOX_DIR`, `AIRLOCK_EXIT` — assigned from the
+  `THEME`, `SANDBOX_DIR`, `AIRLOCK_EXIT` — assigned from the
   values the steps return; the
-  option globals (`REBUILD`, `MONITOR`, `USE_TMUX`, `REMOTE_CONTROL`, `THEME`,
+  option globals (`REBUILD`, `MONITOR`, `USE_TMUX`, `THEME`,
   `SHOW_USAGE`) are assigned by `parse_args` itself, per the exemption above.
   `THEME` appears in both lists: `parse_args` seeds it
   with the `--theme` value and the main sequence reassigns it from
   `resolve_theme`, which folds in the env variable and the detection.
-- `SHIM_DIR`, the `EXIT` trap that removes it, and the `PATH` that points at it
-  are set at top level rather than inside `create_docker_shim`. A trap and an
-  export have to be made by the shell that goes on running, and a trap set
-  inside a command substitution would fire when that subshell ended — deleting
-  the shim before it was ever used.
 - `-h`/`--help` sets `SHOW_USAGE` and `break`s out; the main sequence is what
   calls `usage`, keeping `parse_args` pure parsing. `break` rather than
   continuing to parse is what keeps `--help --bogus` exiting 0.
@@ -100,10 +95,10 @@ print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-
   the script's own — anything added after the launch must not become the
   exit status the caller sees.
 - The `${MONITOR:+--monitor}`, `${USE_TMUX:+tmux -u new-session -A -s claude}`,
-  `${REMOTE_CONTROL:+...}` and `${THEME:+...}` expansions on that line are
+  and `${THEME:+...}` expansions on that line are
   **unquoted on purpose**: an empty one has to disappear entirely rather than
   become an empty argument. Quoting them "to satisfy shellcheck" breaks `-M`,
-  `-T`, `-c` and the theme, and the suite's exact-argv assertions catch it.
+  `-T` and the theme, and the suite's exact-argv assertions catch it.
   Inside `${THEME:+...}` the escaped quotes around the settings JSON are the
   opposite and load-bearing the other way: they keep `{"theme":"dark"}` one
   word through the unquoted expansion, and the suite's `ARGV` dump asserts
@@ -118,9 +113,10 @@ print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-
 - The tmux flag is `USE_TMUX`, not `TMUX`: tmux sets `TMUX` itself to mark a
   shell as being inside a session, so a variable of ours by that name would be
   read as that one.
-- The Dockerfile is an inline heredoc inside `build_image_if_needed`. Its
-  `ARG GIT_USER_NAME`/`GIT_USER_EMAIL` pair stays last so a changed git
-  identity doesn't invalidate the cached Claude Code install above it.
+- The Dockerfile is an inline heredoc inside `build_image_if_needed`. It
+  bakes in nothing host-specific, so one image serves every project and
+  user on the machine; anything that varies per host or per run (the git
+  identity, the token, the mounts) travels in the generated config instead.
 
 ## Why each step is the way it is
 
@@ -162,12 +158,12 @@ print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-
   on timeout it still hands over what it consumed, which is why a
   BEL-terminated reply parses anyway (`channel_as_8_bit` strips the trailing
   terminator as non-hex).
-- **`create_docker_shim` exists because `airlock` always shells out to a
-  literal `docker` command**, so a podman-only host needs something by that
-  name to forward to podman. The shim directory is created with an explicit
-  `mktemp` template: bare `mktemp -d` is a GNU convenience, and BSD `mktemp` —
-  what macOS ships — requires the template. macOS is the case that reaches this
-  path, since podman is the usual engine there.
+- **`generate_airlock_config` writes the picked engine into
+  `[vm.image] resolution`** because `airlock` shells out to the engine the
+  config names to find a locally built image, and `docker` and `podman` are
+  both first-class values there. The default `auto` would work too but tries
+  `docker` first, which on a podman-only host (the usual macOS case) is a
+  wasted spawn and a misleading error when the image is missing.
 - **`remove_sandbox_on_rebuild` goes through `airlock remove --force` because
   the sandbox lives in airlock's data directory, not in the project.** The
   disk, the image hardlink, the CA, the install records and the local config
@@ -196,30 +192,44 @@ print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-
   expands it inside `[env]`** rather than appending the key after the fact. An
   appended key joins whichever table ends up last, so adding a table below
   `[env]` would silently move it out and stop the opt-out reaching the VM.
-  Under `-c` there *is* a table below `[env]` — the middleware override — which
-  is exactly why the opt-out has to stay lexically inside `[env]`, above it;
-  the suite asserts that placement.
-- **`-c` disables the preset's `claude-auth-token` middleware in the generated
-  config; clearing the env var alone would not be enough.** The middleware's
-  `env.TOKEN = "${CLAUDE_CODE_OAUTH_TOKEN}"` template resolves from the host
-  env with the airlock secret vault as fallback, and airlock *aborts
-  `airlock start` when it resolves in neither* — so without the override, `-c`
-  would fail on precisely the machine it exists for, one with no token set up.
-  And when the token does resolve, the middleware overwrites the
-  `Authorization` header on every `api.anthropic.com` request, stomping the
-  credentials of the interactive login `-c` exists to enable. `enabled = false`
-  on the preset's named entry is airlock's supported override mechanism: local
-  config merges over presets, and a disabled middleware is skipped before its
-  templates are ever resolved.
-- **The placeholder token is cleared with `env -u` on the launch line, not in
-  the config.** The placeholder comes from the preset's `[env]` table, and
-  airlock's config merge cannot *remove* a key a preset set — later files can
-  only override values, and a `null` never overwrites — so the variable is
-  stripped at exec time instead. It has to go entirely: Claude Code treats a
-  present `CLAUDE_CODE_OAUTH_TOKEN` as its credential and skips interactive
-  login, which is what breaks `--remote-control` in the first place. The login
-  that `-c` forces lands in `~/.claude`, which the preset persists to
-  `~/.airlock/claude/settings` on the host, so it survives across runs.
+  With `--mount-rw`/`--mount-ro` there *are* tables below `[env]` — the
+  mounts — which is exactly why the opt-out, the token override and the git
+  identity lines have to stay lexically inside `[env]`, above them; the suite
+  asserts that placement.
+- **The generated config turns on airlock's `anthropic` sign-in service and
+  makes the preset's token entry optional; that pair is what lets a session
+  log in from inside the sandbox.** The `claude-code` preset declares
+  `CLAUDE_CODE_OAUTH_TOKEN` as a masked `[env]` entry whose `${...}` template
+  must resolve from the host env or the vault, so on a machine without a
+  token `airlock start` would stop with a config error before anything ran.
+  Config layers merge as JSON before a single parse, so
+  `CLAUDE_CODE_OAUTH_TOKEN = { optional = true }` in the local config folds
+  into the preset's entry instead of replacing it: with a host token the
+  entry is still masked and injected into `api.anthropic.com` requests at the
+  host boundary, and without one it is left out and `claude` starts with no
+  credential. `[network.services] anthropic = true` is what then makes
+  `/login` work: airlock owns `platform.claude.com` and `api.anthropic.com`,
+  opens the sign-in page in the host browser, keeps the real tokens encrypted
+  on the host and hands the sandbox surrogates — the same arrangement
+  airlock's own `claude` pack uses. The service needs a usable secret vault
+  (the default keyring is fine): with the vault disabled or unreadable,
+  airlock blocks the service's hosts under every policy and prints a warning
+  naming the opt-out, and `api.anthropic.com` goes with them. A sign-in is
+  shared by every airlock sandbox that enables the service, and a logout in
+  one signs out all. Nothing on the launch line concerns credentials.
+- **`git_identity_env` resolves the host's git identity on every run and
+  hands it to the VM as `GIT_AUTHOR_*`/`GIT_COMMITTER_*` in `[env]`** rather
+  than baking `user.name`/`user.email` into the image. It runs in the project
+  directory, so `git config --get` sees repo-local config, includes and
+  conditional includes exactly as git on the host would, and a host
+  `GIT_AUTHOR_NAME` (and the other three) outranks it, as it would for git
+  itself. The values cross two syntaxes on the way: `[env]` values are
+  airlock `${VAR}` templates, so `template_escaped` backslash-escapes `$` and
+  `\` first (the rule airlock's `git` pack applies), and `toml_escaped` then
+  escapes the result for the TOML string. `airlock` forwards only the env
+  vars the config names, which is why the identity has to be in `[env]` at
+  all. An empty identity produces no lines, and git in the VM falls back to
+  its own guesses.
 - **A failed config write aborts the run instead of falling through to the
   launch.** Otherwise `airlock` would start on whatever `airlock.local.toml` a
   previous run left in the directory, or on its own defaults, and the
@@ -380,13 +390,6 @@ tmux, UTF-8, the permission bypass); the reasoning behind it lives here:
 
 Things that aren't visible from the script at all:
 
-- **The first build's working directory decides the baked-in git identity.**
-  The host identity is read with `git config --list --includes`, which picks up
-  *repo-local* config — so whichever directory you happen to run the first
-  build from is what gets written into the image's `/etc/gitconfig`. The list
-  is printed in *increasing* precedence order, which is why the script takes
-  the last occurrence of each key. It's captured at build time, so changing the
-  identity on the host needs a `-r` rebuild to take effect.
 - **The wrapper's update output goes to stderr on purpose**, so `claude -p`
   stdout stays clean for scripting. A failed update is non-fatal — the session
   falls back to the version baked into the image.
@@ -511,7 +514,7 @@ Things that aren't visible from the script at all:
   shells out to has to be added to `TOOLS`, or every case that reaches it
   fails in a way that looks like the feature is broken.
 - **Stubs read their behavior from exported env vars** (`STUB_IMAGE_MISSING`,
-  `STUB_BUILD_FAILS`, `STUB_REMOVE_EXIT`, `STUB_NO_SANDBOX`, `PROBE_DOCKER`),
+  `STUB_BUILD_FAILS`, `STUB_REMOVE_EXIT`, `STUB_NO_SANDBOX`, `STUB_GIT_NAME`, `STUB_GIT_EMAIL`),
   which is what lets them be
   written once as literal heredocs and varied per case. `new_case` resets them
   all.

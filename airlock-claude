@@ -4,8 +4,8 @@ IMAGE=airlock-claude:latest
 
 usage() {
   cat <<'USAGE'
-Usage: airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-c|--remote-control]
-                      [--theme <theme>] [--mount-rw <dir>] [--mount-ro <dir>]
+Usage: airlock-claude [-M|--no-monitor] [-T|--no-tmux] [--theme <theme>]
+                      [--mount-rw <dir>] [--mount-ro <dir>]
                       [-r|--rebuild-image] [-h|--help]
                       [-- <claude args...>]
        airlock-claude [-M|--no-monitor] [-T|--no-tmux] [--mount-rw <dir>]
@@ -19,21 +19,15 @@ The session runs inside tmux, under airlock's monitor TUI, by default.
 
 When the session ends, the last lines of its output are printed again —
 the monitor and tmux restore the host screen on exit, taking the session's
-final words with them — and the whole terminal log of the run is kept in
-.airlock/sandbox/pty.dump, with the previous run's log beside it as
-pty.dump.previous.
+final words with them — and the whole terminal log of the run is kept as
+pty.dump in the sandbox directory (`airlock info` shows it), with the
+previous run's log beside it as pty.dump.previous.
 
   -M, --no-monitor     Run without the monitor TUI, handing the host terminal
                        straight to the session.
   -m, --monitor        Run under the monitor TUI (the default).
   -T, --no-tmux        Run claude directly instead of inside tmux.
   -t, --tmux           Run inside tmux (the default).
-  -c, --remote-control Run claude with --remote-control. Turns off the
-                       preset's OAuth token injection and hides its
-                       placeholder token from the session, so claude asks
-                       for an interactive login instead — remote control
-                       doesn't work on an injected token. The login is
-                       saved under ~/.airlock/claude and reused next run.
   --theme <theme>      Tell claude which colour theme to use: dark, light,
                        auto, dark-daltonized, light-daltonized, dark-ansi or
                        light-ansi. The AIRLOCK_CLAUDE_THEME environment
@@ -54,8 +48,8 @@ pty.dump.previous.
                        and build against the directory but not change it.
   -x, --exec           Run the command given after -- instead of claude,
                        in the same VM and, by default, the same tmux and
-                       monitor wrappers. The claude-only flags --theme and
-                       -c/--remote-control cannot be combined with it.
+                       monitor wrappers. The claude-only flag --theme
+                       cannot be combined with it.
   -r, --rebuild-image  Rebuild the sandbox image from scratch, ignoring the
                        layer cache and re-pulling the base image, and drop
                        the local .airlock directory so airlock converts the
@@ -75,7 +69,7 @@ USAGE
 }
 
 parse_args() {
-  REBUILD= MONITOR=1 USE_TMUX=1 REMOTE_CONTROL= THEME= EXEC= SHOW_USAGE= CLAUDE_ARGS=()
+  REBUILD= MONITOR=1 USE_TMUX=1 THEME= EXEC= SHOW_USAGE= CLAUDE_ARGS=()
   MOUNTS_RW=() MOUNTS_RO=()
   while [[ $# -gt 0 ]]; do
     case $1 in
@@ -84,7 +78,6 @@ parse_args() {
       -M|--no-monitor) MONITOR= ;;
       -t|--tmux) USE_TMUX=1 ;;
       -T|--no-tmux) USE_TMUX= ;;
-      -c|--remote-control) REMOTE_CONTROL=1 ;;
       --theme)
         if [[ $# -lt 2 ]]; then
           echo "airlock-claude: --theme needs a value" >&2
@@ -115,17 +108,14 @@ parse_args() {
 }
 
 validate_exec_usage() {
-  local exec_given=$1 remote_control=$2 flag_theme=$3 command_word_count=$4
+  local exec_given=$1 flag_theme=$2 command_word_count=$3
   [[ -n $exec_given ]] || return 0
   if (( command_word_count == 0 )); then
     echo "airlock-claude: --exec needs a command after --" >&2
     return 2
   fi
-  local conflict=
-  [[ -n $remote_control ]] && conflict=--remote-control
-  [[ -n $flag_theme ]] && conflict=--theme
-  if [[ -n $conflict ]]; then
-    echo "airlock-claude: $conflict configures claude, which --exec replaces" >&2
+  if [[ -n $flag_theme ]]; then
+    echo "airlock-claude: --theme configures claude, which --exec replaces" >&2
     return 2
   fi
 }
@@ -295,15 +285,6 @@ pick_container_engine() {
   fi
 }
 
-create_docker_shim() {
-  local shim_dir
-  shim_dir=$(mktemp -d "${TMPDIR:-/tmp}/airlock-claude.XXXXXX") || return 1
-  printf '#!/bin/sh\nexec podman "$@"\n' > "$shim_dir/docker" \
-    && chmod +x "$shim_dir/docker" \
-    || { rm -rf "$shim_dir"; return 1; }
-  printf '%s\n' "$shim_dir"
-}
-
 build_image_if_needed() {
   local engine=$1 rebuild=$2
   if [[ -z $rebuild ]] && "$engine" image inspect "$IMAGE" >/dev/null 2>&1; then
@@ -313,13 +294,7 @@ build_image_if_needed() {
   echo "Building $IMAGE with $engine ..." >&2
   local build_flags=()
   [[ -n $rebuild ]] && build_flags=(--no-cache --pull)
-  local config_in_precedence_order git_user_name git_user_email
-  config_in_precedence_order=$(git config --list --includes 2>/dev/null)
-  git_user_name=$(printf '%s\n' "$config_in_precedence_order" | sed -n 's/^user\.name=//p' | tail -1)
-  git_user_email=$(printf '%s\n' "$config_in_precedence_order" | sed -n 's/^user\.email=//p' | tail -1)
-  "$engine" build -t "$IMAGE" "${build_flags[@]}" \
-    --build-arg "GIT_USER_NAME=$git_user_name" \
-    --build-arg "GIT_USER_EMAIL=$git_user_email" - <<'DOCKERFILE' || return 1
+  "$engine" build -t "$IMAGE" "${build_flags[@]}" - <<'DOCKERFILE' || return 1
 FROM python:3.14-slim
 RUN DEBIAN_FRONTEND=noninteractive apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -474,11 +449,6 @@ RUN printf '%s\n' \
       'alias ll="ls -lh"' \
       'alias lll="ls -lhA"' \
       >> /etc/bash.bashrc
-
-ARG GIT_USER_NAME=
-ARG GIT_USER_EMAIL=
-RUN if [ -n "$GIT_USER_NAME" ]; then git config --system user.name "$GIT_USER_NAME"; fi \
- && if [ -n "$GIT_USER_EMAIL" ]; then git config --system user.email "$GIT_USER_EMAIL"; fi
 DOCKERFILE
 }
 
@@ -490,16 +460,35 @@ remove_sandbox_on_rebuild() {
   fi
 }
 
+template_escaped() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\$/\\\$}
+  printf '%s\n' "$s"
+}
+
+env_line() {
+  local name=$1 value=$2
+  [[ -n $value ]] || return 0
+  printf '%s = "%s"\n' "$name" "$(toml_escaped "$(template_escaped "$value")")"
+}
+
+git_identity_env() {
+  local author_name=$1 author_email=$2 committer_name=$3 committer_email=$4
+  local user_name user_email
+  user_name=$(git config --get user.name 2>/dev/null)
+  user_email=$(git config --get user.email 2>/dev/null)
+  env_line GIT_AUTHOR_NAME "${author_name:-$user_name}"
+  env_line GIT_AUTHOR_EMAIL "${author_email:-$user_email}"
+  env_line GIT_COMMITTER_NAME "${committer_name:-$user_name}"
+  env_line GIT_COMMITTER_EMAIL "${committer_email:-$user_email}"
+}
+
 generate_airlock_config() {
-  local skip_update=$1 remote_control=$2 extra_mounts=$3
+  local engine=$1 skip_update=$2 git_identity=$3 extra_mounts=$4
   local skip_update_line=
   if [[ -n $skip_update ]]; then
     skip_update_line='AIRLOCK_CLAUDE_SKIP_UPDATE = "1"'
-  fi
-  local token_middleware_override=
-  if [[ -n $remote_control ]]; then
-    token_middleware_override='[network.middleware.claude-auth-token]
-enabled = false'
   fi
 
   if ! cat > airlock.local.toml <<EOF
@@ -508,14 +497,18 @@ presets = ["claude-code", "debian", "python"]
 [network]
 policy = "deny-by-default"
 
+[network.services]
+anthropic = true
+
 [vm.image]
 name = "$IMAGE"
-resolution = "docker"
+resolution = "$engine"
 
 [env]
 DISABLE_AUTOUPDATER = "1"
+CLAUDE_CODE_OAUTH_TOKEN = { optional = true }
 $skip_update_line
-$token_middleware_override
+$git_identity
 $extra_mounts
 EOF
   then
@@ -562,7 +555,7 @@ print_pty_dump_tail() {
 parse_args "$@" || exit $?
 [[ -n $SHOW_USAGE ]] && { usage; exit 0; }
 
-validate_exec_usage "$EXEC" "$REMOTE_CONTROL" "$THEME" "${#CLAUDE_ARGS[@]}" || exit $?
+validate_exec_usage "$EXEC" "$THEME" "${#CLAUDE_ARGS[@]}" || exit $?
 
 require_airlock || exit 1
 
@@ -573,15 +566,12 @@ fi
 resolve_extra_mounts || exit $?
 
 CONTAINER_ENGINE=$(pick_container_engine) || exit 1
-if [[ $CONTAINER_ENGINE == podman ]]; then
-  SHIM_DIR=$(create_docker_shim) || exit 1
-  trap 'rm -rf "$SHIM_DIR"' EXIT
-  export PATH="$SHIM_DIR:$PATH"
-fi
 
 build_image_if_needed "$CONTAINER_ENGINE" "$REBUILD" || exit 1
 remove_sandbox_on_rebuild "$REBUILD" || exit 1
-generate_airlock_config "${AIRLOCK_CLAUDE_SKIP_UPDATE:-}" "$REMOTE_CONTROL" "$(extra_mounts_toml)" || exit 1
+generate_airlock_config "$CONTAINER_ENGINE" "${AIRLOCK_CLAUDE_SKIP_UPDATE:-}" \
+  "$(git_identity_env "${GIT_AUTHOR_NAME:-}" "${GIT_AUTHOR_EMAIL:-}" "${GIT_COMMITTER_NAME:-}" "${GIT_COMMITTER_EMAIL:-}")" \
+  "$(extra_mounts_toml)" || exit 1
 
 SANDBOX_DIR=$(sandbox_dir)
 [[ -n $SANDBOX_DIR ]] && keep_previous_pty_dump "$SANDBOX_DIR/pty.dump"
@@ -589,9 +579,8 @@ SANDBOX_DIR=$(sandbox_dir)
 if [[ -n $EXEC ]]; then
   SESSION_COMMAND=("${CLAUDE_ARGS[@]}")
 else
-  SESSION_COMMAND=(${REMOTE_CONTROL:+env -u CLAUDE_CODE_OAUTH_TOKEN} claude)
+  SESSION_COMMAND=(claude)
   [[ -n $THEME ]] && SESSION_COMMAND+=(--settings "{\"theme\":\"$THEME\"}")
-  [[ -n $REMOTE_CONTROL ]] && SESSION_COMMAND+=(--remote-control)
   SESSION_COMMAND+=("${CLAUDE_ARGS[@]}")
 fi
 

@@ -11,9 +11,10 @@ Claude Code session with network access denied by default.
 - `docker` or `podman` (used to build the sandbox VM image)
 - [`airlock`](https://github.com/milankinen/airlock) (the sandboxing CLI
   that starts the VM)
-- a `CLAUDE_CODE_OAUTH_TOKEN` on the host — in the environment or in
-  `airlock`'s secret vault; `claude setup-token` on the host generates
-  one — unless you log in interactively with `-c`
+- optionally a `CLAUDE_CODE_OAUTH_TOKEN` on the host — in the environment or
+  in `airlock`'s secret vault; `claude setup-token` generates one. Without
+  it, `/login` inside the session signs you in through your host browser
+  (see **Login** below)
 
 ## Usage
 
@@ -56,13 +57,10 @@ airlock-claude -x -- bash               # a sandboxed shell, no claude
   from the host terminal, since claude's own detection can't see your
   terminal from inside the VM; either way it applies per launch, without
   touching your persisted settings.
-- `-c`, `--remote-control` — run with a real interactive login (see
-  **Login** below).
 - `-x`, `--exec` — run the command after `--` in place of `claude`. The
-  claude-only flags (`--theme`, `-c`) don't combine with it.
+  claude-only flag `--theme` doesn't combine with it.
 - `-r`, `--rebuild-image` — rebuild the image from scratch, to pick up newer
-  base packages or a changed host git identity (both are baked in at build
-  time), and remove the project's sandbox (`airlock remove`) so the new
+  base packages, and remove the project's sandbox (`airlock remove`) so the new
   image gets a fresh one. Anything installed inside the VM is lost; your
   persisted Claude settings and login are not. Takes minutes; a plain run
   only builds when the image is missing.
@@ -75,13 +73,21 @@ Claude Code without leaving the sandbox. Detaching (`prefix+d`) doesn't leave a 
 to — the tmux client is what `airlock` waits on, so detaching stops the VM.
 
 **Login.** Your host `~/.claude` stays on the host; the VM gets its own,
-persisted between runs under `~/.airlock/claude`. No login happens in the
-sandbox: `airlock`'s `claude-code` preset injects your
-`CLAUDE_CODE_OAUTH_TOKEN` into API requests at the host boundary, so the
-token never enters the VM. The exception is `-c`, which claude's
-`--remote-control` requires: it turns off the injection and has you log in
-for real, persisting that login under `~/.airlock/claude` for later `-c`
-runs — with the trade-off that those credentials live inside the sandbox.
+persisted between runs under `~/.airlock/claude`. With a
+`CLAUDE_CODE_OAUTH_TOKEN` on the host, `airlock`'s `claude-code` preset
+injects it into API requests at the host boundary and the session only ever
+sees a surrogate. Without one, run `/login` in the session: `airlock`'s
+`anthropic` sign-in service opens the sign-in page in your host browser,
+keeps the real tokens encrypted on the host (it needs `airlock`'s secret
+vault; the default keyring works) and again hands the session surrogates.
+That sign-in is shared by every `airlock` sandbox that enables the service,
+and logging out in one logs out all.
+
+**Git identity.** Commits made in the session carry your host identity: on
+every run the script reads `user.name` and `user.email` as git sees them
+from the project directory (repo-local config included) and passes them in
+as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`; a `GIT_AUTHOR_NAME` and friends set on
+the host take precedence. Nothing is baked into the image.
 
 **Session log.** Every run records the session's raw terminal stream to
 `pty.dump` in the sandbox directory (`airlock info` shows it; one previous
