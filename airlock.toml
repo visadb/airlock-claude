@@ -1,4 +1,4 @@
 [mounts."orbit"]
-source = "../airlock"
+source = "~/src/airlock"
 target = "airlock"
 read_only = true
