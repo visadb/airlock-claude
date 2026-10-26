@@ -279,11 +279,11 @@ run_script --no-tmux
 assert_eq "LAUNCH: start --monitor --network deny-by-default -- bash -c <script> airlock-claude2 claude" \
   "$(grep '^LAUNCH:' "$LOG")" "--no-tmux changes the sandbox-side script, not the launch argv"
 assert_eq 'exec "$@"' "$(tail -n 1 "$(SESSION_SCRIPT)")" "--no-tmux hands straight to the command"
-assert_not_grep "tmux" "$(SESSION_SCRIPT)" "--no-tmux leaves tmux out of the sandbox-side script"
+assert_not_grep "exec tmux" "$(SESSION_SCRIPT)" "--no-tmux does not launch tmux"
 
 new_case; stub_all
 run_script -T
-assert_not_grep "tmux" "$(SESSION_SCRIPT)" "-T is the short form"
+assert_not_grep "exec tmux" "$(SESSION_SCRIPT)" "-T is the short form"
 
 new_case; stub_all
 run_script
@@ -531,7 +531,7 @@ assert_grep '"skipDangerousModePermissionPrompt": true' "$(SESSION_SCRIPT)" "man
 assert_grep "^cat > /etc/claude-code/CLAUDE.md <<" "$(SESSION_SCRIPT)" "the managed memory is written on every launch"
 assert_grep "denied by network policy" "$(SESSION_SCRIPT)" "managed memory describes the 403 the proxy answers denied requests with"
 assert_grep "remind them to revert the airlock" "$(SESSION_SCRIPT)" "managed memory tells Claude Code it can ask for temporary network access"
-assert_grep "apk add" "$(SESSION_SCRIPT)" "managed memory says packages come from apk"
+assert_grep "Alpine Linux on musl" "$(SESSION_SCRIPT)" "managed memory says the sandbox is Alpine on musl and packages come from apk"
 assert_grep "VERIFY_X509_STRICT" "$(SESSION_SCRIPT)" "managed memory tells Claude Code how to get Python past the TLS proxy"
 assert_grep "delete or overwrite a virtualenv you did not create in this session" "$(SESSION_SCRIPT)" \
   "managed memory keeps Claude Code out of the host's virtualenvs"
@@ -541,7 +541,7 @@ assert_eq "1" "$(grep -c '^exec ' "$(SESSION_SCRIPT)")" "exactly one exec line h
 
 new_case; stub_all
 run_script -T
-assert_not_grep "apk add" "$(SESSION_SCRIPT)" "-T installs no tmux"
+assert_not_grep "apk add --quiet tmux" "$(SESSION_SCRIPT)" "-T installs no tmux"
 assert_grep "^cat > /etc/tmux.conf <<" "$(SESSION_SCRIPT)" "-T still writes the tmux config, for a tmux started by hand"
 assert_grep "/etc/claude-code/CLAUDE.md" "$(SESSION_SCRIPT)" "-T still writes the managed memory"
 assert_eq 'exec "$@"' "$(tail -n 1 "$(SESSION_SCRIPT)")" "-T ends with a plain exec"
