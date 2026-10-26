@@ -102,8 +102,9 @@ lines, since a block missing its END line stops the script.
 A changed mount set is a configuration change: `airlock` asks about it
 once at start; accept it. Without a terminal that question aborts, so
 change mounts in an interactive run first. Mounts need a sandbox to
-exist already: on a project's first run they are refused, because the
-file would keep the setup wizard from appearing; run once without them.
+exist already: on a project's first run, or together with `-r`, they are
+refused, because the file would keep the setup wizard from appearing; run
+once without them.
 The mount point `airlock` creates in the project directory remains,
 empty, after the session, and a same-named project directory is
 shadowed for the session, untouched underneath.

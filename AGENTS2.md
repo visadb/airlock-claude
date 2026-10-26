@@ -9,10 +9,10 @@ A single-file launcher, `airlock-claude2`, that runs Claude Code sandboxed
 in an `airlock` VM in any directory, built on airlock's packs and
 templates. It builds nothing and writes no config but the mounts block:
 airlock's setup wizard picks the packs (or a template) on a project's
-first start, the script
-imposes the deny-by-default policy on the launch line, and a short bash
-prelude prepares the sandbox before every session. The shipped artifact is
-that one script. `test-airlock-claude2` is its suite.
+first start, the script imposes the deny-by-default policy on the launch
+line, and a short bash prelude prepares the sandbox before every session.
+The shipped artifact is that one script. `test-airlock-claude2` is its
+suite.
 
 ## Where the reasoning lives
 
@@ -75,7 +75,8 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
 
 ## Why each step is the way it is
 
-- **The script writes no config except the mounts block, and that is what makes templates work.**
+- **The script writes no config except the mounts block, and that is
+  what makes templates work.**
   A template can only be chosen in airlock's interactive setup wizard
   (`airlock start` has no `--template` flag), and the wizard runs only
   when the project has no config at all — no `airlock.toml`, no
