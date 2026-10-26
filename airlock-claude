@@ -449,6 +449,13 @@ RUN printf '%s\n' \
       'nvm use needed. nvm itself is a shell function: login shells have it, and' \
       'a non-login shell (this Bash tool included) must source /opt/nvm/nvm.sh' \
       'first to run nvm install or nvm use.' \
+      '' \
+      '## Describe the present only' \
+      '' \
+      'When you write or change comments or documentation, describe how things' \
+      'are now. Never add notes about how something used to work, what an' \
+      'approach replaced, or why an old way is gone. That history belongs in' \
+      'the commit message, and nowhere else.' \
       > /etc/claude-code/CLAUDE.md
 
 RUN printf '%s\n' \
@@ -475,9 +482,10 @@ RUN if [ -n "$GIT_USER_NAME" ]; then git config --system user.name "$GIT_USER_NA
 DOCKERFILE
 }
 
-drop_vm_cache_on_rebuild() {
+remove_sandbox_on_rebuild() {
   local rebuild=$1
   if [[ -n $rebuild ]]; then
+    airlock remove --force >&2 || return 1
     rm -rf .airlock
   fi
 }
@@ -516,19 +524,8 @@ EOF
   fi
 }
 
-home_on_working_filesystem() {
-  local current_home=$1
-  local df_bin fs_root
-  df_bin=$(command -v gdf || command -v df) || {
-    echo "Neither gdf nor df found in PATH" >&2
-    return 1
-  }
-  fs_root=$("$df_bin" --output=target . 2>/dev/null | tail -1)
-  if [[ $fs_root == /* && $fs_root != "/" && $fs_root != "/home" ]]; then
-    printf '%s\n' "$fs_root"
-  else
-    printf '%s\n' "$current_home"
-  fi
+sandbox_dir() {
+  airlock info --json 2>/dev/null | sed -n 's/^ *"dir": *"\(.*\)",\{0,1\}$/\1/p'
 }
 
 keep_previous_pty_dump() {
@@ -583,13 +580,11 @@ if [[ $CONTAINER_ENGINE == podman ]]; then
 fi
 
 build_image_if_needed "$CONTAINER_ENGINE" "$REBUILD" || exit 1
-drop_vm_cache_on_rebuild "$REBUILD"
+remove_sandbox_on_rebuild "$REBUILD" || exit 1
 generate_airlock_config "${AIRLOCK_CLAUDE_SKIP_UPDATE:-}" "$REMOTE_CONTROL" "$(extra_mounts_toml)" || exit 1
 
-HOME=$(home_on_working_filesystem "$HOME") || exit 1
-export HOME
-
-keep_previous_pty_dump .airlock/sandbox/pty.dump
+SANDBOX_DIR=$(sandbox_dir)
+[[ -n $SANDBOX_DIR ]] && keep_previous_pty_dump "$SANDBOX_DIR/pty.dump"
 
 if [[ -n $EXEC ]]; then
   SESSION_COMMAND=("${CLAUDE_ARGS[@]}")
@@ -603,5 +598,6 @@ fi
 AIRLOCK_PTY_DUMP=1 airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} "${SESSION_COMMAND[@]}"
 AIRLOCK_EXIT=$?
 
-print_pty_dump_tail .airlock/sandbox/pty.dump 15 >&2
+SANDBOX_DIR=$(sandbox_dir)
+[[ -n $SANDBOX_DIR ]] && print_pty_dump_tail "$SANDBOX_DIR/pty.dump" 15 >&2
 exit "$AIRLOCK_EXIT"

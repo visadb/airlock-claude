@@ -22,7 +22,9 @@ must not break. Anything the code cannot say for itself is written down in one
 of those two files and nowhere else.
 
 Keep it that way. When a change needs an explanation, put the explanation
-here (or in `README.md` if a user would want it) rather than in a comment, and
+here (or in `README.md` if a user would want it) rather than in a comment,
+describe only how things are now — how something used to work, or what a
+step replaced, belongs in the commit message, not here — and
 prefer encoding it in a name where a name can carry it — `USE_TMUX`,
 `config_in_precedence_order` and `/tmp/.airlock-claude-updated-this-boot` all
 exist in that shape on purpose. Don't copy reasoning from here back into the
@@ -43,11 +45,12 @@ resolve_theme <flag_theme> <env_theme> <colorfgbg>  -> theme for claude's --sett
 pick_container_engine                       -> docker | podman
 create_docker_shim                          -> a directory holding a `docker` that runs podman
 build_image_if_needed <engine> <rebuild>        $IMAGE from an inline Dockerfile
-drop_vm_cache_on_rebuild <rebuild>
+remove_sandbox_on_rebuild <rebuild>         `airlock remove --force`, so the new image gets a new sandbox
 generate_airlock_config <skip_update> <remote_control>  writes airlock.local.toml
-home_on_working_filesystem <current_home>   -> the HOME to run airlock with
+sandbox_dir                                 -> the sandbox directory `airlock info` reports, or nothing
 keep_previous_pty_dump <dump>               sets last run's log aside as <dump>.previous
     (the airlock start line — the handoff)
+sandbox_dir                                 again: a first run has no sandbox until airlock made one
 print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-stripped
 ```
 
@@ -56,8 +59,7 @@ print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-
   first line of the function; outputs are printed.** No step function reads or
   writes script *state*, so its whole contract is visible at the call site.
   When a step needs a value from the environment
-  (`AIRLOCK_CLAUDE_SKIP_UPDATE`, `HOME`), the main sequence reads it and passes
-  it in.
+  (`AIRLOCK_CLAUDE_SKIP_UPDATE`), the main sequence reads it and passes it in.
 - **`parse_args` is the one deliberate exemption from that rule: it sets its
   option globals directly instead of printing them.** Its output includes an
   arbitrary-argument array — `CLAUDE_ARGS`, the arguments after `--`,
@@ -75,11 +77,11 @@ print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-
   the script carries on regardless. Every step is written to be safe to
   capture.
 - The main sequence owns all remaining script state — `CONTAINER_ENGINE`,
-  `SHIM_DIR`, `HOME`, `THEME`, `AIRLOCK_EXIT` — assigned from the values the
-  steps return; the
+  `SHIM_DIR`, `THEME`, `SANDBOX_DIR`, `AIRLOCK_EXIT` — assigned from the
+  values the steps return; the
   option globals (`REBUILD`, `MONITOR`, `USE_TMUX`, `REMOTE_CONTROL`, `THEME`,
   `SHOW_USAGE`) are assigned by `parse_args` itself, per the exemption above.
-  `THEME` appears in both lists the way `HOME` does: `parse_args` seeds it
+  `THEME` appears in both lists: `parse_args` seeds it
   with the `--theme` value and the main sequence reassigns it from
   `resolve_theme`, which folds in the env variable and the detection.
 - `SHIM_DIR`, the `EXIT` trap that removes it, and the `PATH` that points at it
@@ -89,11 +91,10 @@ print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-
   the shim before it was ever used.
 - `-h`/`--help` sets `SHOW_USAGE` and `break`s out; the main sequence is what
   calls `usage`, keeping `parse_args` pure parsing. `break` rather than
-  continuing to parse is what keeps `--help --bogus` exiting 0, as it did when
-  `--help` exited from inside the loop.
+  continuing to parse is what keeps `--help --bogus` exiting 0.
 - The `airlock start` line is deliberately *not* in a function — it's the
   handoff, and keeping it at top level means "what does this script ultimately
-  run?" is answered by reading it. It is no longer the literal last line: its
+  run?" is answered by reading it. It isn't the literal last line: its
   exit status is captured into `AIRLOCK_EXIT`, the session tail is printed,
   and the explicit `exit "$AIRLOCK_EXIT"` hands airlock's status through as
   the script's own — anything added after the launch must not become the
@@ -167,9 +168,30 @@ print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-
   `mktemp` template: bare `mktemp -d` is a GNU convenience, and BSD `mktemp` —
   what macOS ships — requires the template. macOS is the case that reaches this
   path, since podman is the usual engine there.
-- **`drop_vm_cache_on_rebuild` exists because `airlock` caches the VM disk it
-  converts from the OCI image** under `.airlock`, so a freshly built image goes
-  unused until that cache is gone.
+- **`remove_sandbox_on_rebuild` goes through `airlock remove --force` because
+  the sandbox lives in airlock's data directory, not in the project.** The
+  disk, the image hardlink, the CA, the install records and the local config
+  are under `<data dir>/boxes/<id>` — `~/Library/Application Support/airlock`
+  on macOS, `~/.local/share/airlock` on Linux — where nothing the script could
+  delete by path belongs to it. Without the removal, a rebuilt image reaches
+  an existing sandbox as airlock's "Sandbox image has been changed" question,
+  whose "Continue with current sandbox" answer keeps the *old image* in use
+  (`ImageChange::KeepOld`), so a `-r` can finish with the previous image's
+  files still on disk. `remove` is airlock's supported way to start again;
+  its `gc_sweep` also drops the old image from the cache. It runs *before*
+  `generate_airlock_config` because removal deletes `airlock.local.toml`
+  along with the sandbox, and a failure aborts the run for the same reason a
+  failed config write does: launching on the old sandbox would silently not
+  be a rebuild. The `rm -rf .airlock` that follows is for a sandbox an older
+  airlock keeps inside the project: airlock offers to import one at start,
+  and under `-r` that import would only be discarded.
+- **`sandbox_dir` parses `airlock info --json` with `sed`, not `jq`**, because
+  the host isn't guaranteed to have `jq` (macOS doesn't ship it) and the
+  pretty-printed JSON puts `"dir"` on a line of its own. It is called twice:
+  before the launch for the rotation, where a project with no sandbox yet
+  yields nothing and the rotation is skipped, and after, when a first run has
+  a sandbox at last. Its stderr is silenced — "No sandbox for … — run
+  `airlock start` first" is the expected answer on a first run, not news.
 - **`generate_airlock_config` builds `skip_update_line` above the heredoc and
   expands it inside `[env]`** rather than appending the key after the fact. An
   appended key joins whichever table ends up last, so adding a table below
@@ -205,9 +227,9 @@ print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-
   one in effect.
 - **`AIRLOCK_PTY_DUMP=1` is an env prefix on the launch line, not an `[env]`
   entry.** It is read by the airlock CLI itself on the host
-  (`pty_dump_file` in `app/airlock-cli/src/cli/cmd_start.rs`), which then
+  (`DumpSink::from_env` in `app/airlock-cli/src/runtime/dump.rs`), which then
   writes every byte of the guest session's pty — stdout and stderr events
-  both — to `.airlock/sandbox/pty.dump`. Putting it in `[env]` would only
+  both — to `pty.dump` in the sandbox directory. Putting it in `[env]` would only
   forward it into the VM, where nothing reads it. An airlock predating the
   variable ignores it, so the wrapper degrades to recording nothing and
   printing nothing.
@@ -238,12 +260,12 @@ print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-
   work — after a long session the dump can be very large, and only the last
   lines are wanted. Reconstructing the true final screen would need vt100
   emulation, which is exactly the moving part this stays away from.
-- **`home_on_working_filesystem` echoes back the `HOME` it was given unless
-  `df` produced something that looks like an absolute path**, because
-  `df --output` is GNU-only — BSD `df` rejects it, so a Mac without coreutils'
-  `gdf` gets no answer at all. Printing the answer unguarded would set `HOME`
-  to the empty string: `HOME` relocated, but not onto the working filesystem,
-  which is the failure this step exists to prevent, reached by another route.
+- **The script runs `airlock` with the user's own `HOME`, untouched.**
+  airlock resolves `~` from `HOME` (`dirs::home_dir`): its data directory,
+  `~/.airlock` settings, the secret vault and the persisted Claude settings
+  mount all hang off it, so any `HOME` the script set for the launch would
+  make `airlock start` and the user's own `airlock info`/`remove` disagree
+  about which sandbox is theirs.
 
 ## The Dockerfile
 
@@ -380,9 +402,7 @@ Things that aren't visible from the script at all:
   it applies whichever user the VM runs as, and being outside `HOME` it's
   clear of what the preset mounts into the VM's home — except
   that managed settings are the *highest*-precedence source, so a host
-  `~/.claude/settings.json` can't override it. The consequence for the launcher
-  is that an image built before this existed starts with prompts on, and `-r`
-  is the fix.
+  `~/.claude/settings.json` can't override it.
 - **Python HTTPS fails in the sandbox because of `VERIFY_X509_STRICT`, not a
   missing CA.** Every Python client (`urllib`, `http.client`, `urllib3`,
   `requests`, `httpx`, `aiohttp`) rejects the proxy's certificates with
@@ -436,13 +456,11 @@ Things that aren't visible from the script at all:
   answered light, dark, or not at all — the reply was consumed but never
   changed the UI, and the logged-in REPL wasn't reachable headless, so auto
   may be dark-pinned in more places than tmux.
-- **The `HOME` redirect exists because `airlock` hardlinks files out of `HOME`**
-  into its per-directory state, and a hardlink can't cross a filesystem
-  boundary. btrfs subvolumes are the case that surprises people: one mount, but
-  separate filesystems as far as `link(2)` is concerned, so the links fail with
-  `EXDEV`. Repointing `HOME` at the working directory's filesystem root is what
-  puts source and destination on one filesystem. Anything that changes that
-  function has to keep that property — it's not about where config is *findable*.
+- **`airlock remove` under `-r` also discards whatever lived on the sandbox
+  disk** — packages installed with `apt` or `pip` inside the VM, for
+  instance. The sandbox is state airlock rebuilds from the image, and the user's own
+  persisted state (`~/.claude` in the VM) is a mount from the host, which
+  survives.
 
 ## Working on this script
 
@@ -467,11 +485,12 @@ Things that aren't visible from the script at all:
   image with `docker rmi airlock-claude:latest`) — a plain run only builds when
   the image is missing. Note `-r` is a full `--no-cache --pull` build, so it
   takes minutes, not seconds.
-- `airlock.local.toml` and `.airlock/` are runtime artifacts produced by
-  running the script / by `airlock` itself, and both are gitignored —
-  `.airlock/` holds the VM disk, so it must never reach a commit. Don't
-  hand-edit `airlock.local.toml` as a source file either; it's regenerated
-  (clobbered) on every invocation of `airlock-claude`.
+- `airlock.local.toml` is a runtime artifact produced by running the script
+  and is gitignored. Don't hand-edit it as a source file; it's regenerated
+  (clobbered) on every invocation of `airlock-claude`. `.airlock/` is in
+  `.gitignore` because an older airlock keeps the sandbox, VM disk included,
+  there; a current one keeps it in its data directory (`airlock info` shows
+  where).
 - `README.md` is the user-facing description of the same script. A change to
   flags, prerequisites, or the launch line usually needs an edit there too.
 
@@ -480,15 +499,20 @@ Things that aren't visible from the script at all:
 - **Every case runs in its own temp working directory, and no case may `cd`
   into this repo.** The script writes `airlock.local.toml` into the current
   directory and does `rm -rf .airlock` under `-r`, so a case that ran here
-  would clobber files.
+  would clobber files. The `airlock` stub keeps its pretend sandbox at
+  `STUB_BOX`, under the case directory, the way airlock's data directory
+  is outside the project; its `info` answers with that path and its
+  `remove` deletes it together with `airlock.local.toml`, as the real one
+  does, so the suite can assert the config is regenerated afterwards.
 - **`PATH` is rebuilt from scratch for each case** — the stubs plus a symlink
   directory (`TOOLS`) of the handful of real tools the script shells out to —
   so a `docker` or `airlock` installed on the host can't leak in and quietly
-  turn a stub assertion into a real invocation. `df` is left out of `TOOLS` on
-  purpose, so `stub_all_but_df` can withhold it entirely; the `df` stub is the
-  only source of it.
+  turn a stub assertion into a real invocation. A tool the script newly
+  shells out to has to be added to `TOOLS`, or every case that reaches it
+  fails in a way that looks like the feature is broken.
 - **Stubs read their behavior from exported env vars** (`STUB_IMAGE_MISSING`,
-  `STUB_BUILD_FAILS`, `DF_MODE`, `PROBE_DOCKER`), which is what lets them be
+  `STUB_BUILD_FAILS`, `STUB_REMOVE_EXIT`, `STUB_NO_SANDBOX`, `PROBE_DOCKER`),
+  which is what lets them be
   written once as literal heredocs and varied per case. `new_case` resets them
   all.
 - **A missing stub is expressed as a `stub_all_but_*` helper**, never as

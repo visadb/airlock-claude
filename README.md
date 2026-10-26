@@ -62,7 +62,10 @@ airlock-claude -x -- bash               # a sandboxed shell, no claude
   claude-only flags (`--theme`, `-c`) don't combine with it.
 - `-r`, `--rebuild-image` — rebuild the image from scratch, to pick up newer
   base packages or a changed host git identity (both are baked in at build
-  time). Takes minutes; a plain run only builds when the image is missing.
+  time), and remove the project's sandbox (`airlock remove`) so the new
+  image gets a fresh one. Anything installed inside the VM is lost; your
+  persisted Claude settings and login are not. Takes minutes; a plain run
+  only builds when the image is missing.
 
 ## Things to know
 
@@ -81,8 +84,9 @@ for real, persisting that login under `~/.airlock/claude` for later `-c`
 runs — with the trade-off that those credentials live inside the sandbox.
 
 **Session log.** Every run records the session's raw terminal stream to
-`.airlock/sandbox/pty.dump` (one previous run is kept as
-`pty.dump.previous`), and when `airlock` exits the last lines are reprinted,
+`pty.dump` in the sandbox directory (`airlock info` shows it; one previous
+run is kept as `pty.dump.previous`), and when `airlock` exits the last lines
+are reprinted,
 escape-stripped — the monitor and tmux restore the host screen on exit and
 would otherwise take a crash's final words with them. The tail goes to
 stderr, so `-p` output on stdout stays clean.
@@ -101,8 +105,9 @@ fine. The image's managed `/etc/claude-code/CLAUDE.md` already tells every
 session the per-client workaround, how to recognise a network-policy denial,
 and to leave host-made virtualenvs alone.
 
-`airlock.local.toml` and `.airlock/` are runtime artifacts — regenerated per
-run and gitignored; don't edit or commit them.
+`airlock.local.toml` is a runtime artifact — regenerated per run and
+gitignored; don't edit or commit it. The sandbox itself lives in `airlock`'s
+data directory, not in the project.
 
 For everything else — how each step works and why it's shaped the way it
 is — see [AGENTS.md](AGENTS.md).

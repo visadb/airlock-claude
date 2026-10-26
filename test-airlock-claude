@@ -74,11 +74,12 @@ new_case() {
   WORK=$CASE_DIR/work
   FAKE_HOME=$CASE_DIR/home
   LOG=$CASE_DIR/log
+  STUB_BOX=$CASE_DIR/boxes/k3x7q2ma
   mkdir -p "$BIN" "$WORK" "$FAKE_HOME"
   : > "$LOG"
-  export LOG CASE_DIR
-  export STUB_IMAGE_MISSING= STUB_BUILD_FAILS= DF_MODE=root PROBE_DOCKER= DUMP_ARGV=
-  export STUB_PTY_DUMP= STUB_EXIT=
+  export LOG CASE_DIR STUB_BOX
+  export STUB_IMAGE_MISSING= STUB_BUILD_FAILS= PROBE_DOCKER= DUMP_ARGV=
+  export STUB_PTY_DUMP= STUB_EXIT= STUB_REMOVE_EXIT= STUB_NO_SANDBOX=
   export DEFAULTS_MODE=dark
   unset AIRLOCK_CLAUDE_SKIP_UPDATE AIRLOCK_CLAUDE_THEME COLORFGBG
   RC=0
@@ -108,8 +109,20 @@ EOF
 stub_airlock() {
   cat > "$BIN/airlock" <<'EOF'
 #!/bin/sh
+case "$1" in
+  info)
+    if [ -n "${STUB_NO_SANDBOX:-}" ]; then
+      echo "No sandbox for $PWD — run \`airlock start\` first" >&2
+      exit 1
+    fi
+    printf '{\n  "id": "k3x7q2ma",\n  "location": "data-dir",\n  "project": "%s",\n  "dir": "%s",\n  "status": "stopped"\n}\n' "$PWD" "$STUB_BOX"
+    exit 0 ;;
+  remove)
+    echo "REMOVE: $*" >> "$LOG"
+    rm -rf "$STUB_BOX" airlock.local.toml
+    exit "${STUB_REMOVE_EXIT:-0}" ;;
+esac
 echo "LAUNCH: $*" >> "$LOG"
-echo "LAUNCH_HOME: $HOME" >> "$LOG"
 if [ -n "${DUMP_ARGV:-}" ]; then
   for arg; do echo "ARGV[$arg]" >> "$LOG"; done
 fi
@@ -119,26 +132,12 @@ if [ -n "${PROBE_DOCKER:-}" ]; then
 fi
 echo "LAUNCH_PTY_DUMP: ${AIRLOCK_PTY_DUMP:-unset}" >> "$LOG"
 if [ -n "${STUB_PTY_DUMP:-}" ]; then
-  mkdir -p .airlock/sandbox
-  printf '%b' "$STUB_PTY_DUMP" > .airlock/sandbox/pty.dump
+  mkdir -p "$STUB_BOX"
+  printf '%b' "$STUB_PTY_DUMP" > "$STUB_BOX/pty.dump"
 fi
 exit "${STUB_EXIT:-0}"
 EOF
   chmod +x "$BIN/airlock"
-}
-
-stub_df() {
-  cat > "$BIN/df" <<'EOF'
-#!/bin/sh
-case "${DF_MODE:-root}" in
-  root)                printf 'Mounted on\n/\n' ;;
-  separate_filesystem) printf 'Mounted on\n/mnt/data\n' ;;
-  bsd_rejects_output)  echo "df: unrecognized option '--output=target'" >&2; exit 1 ;;
-  header_only)         printf 'Mounted on\n' ;;
-esac
-exit 0
-EOF
-  chmod +x "$BIN/df"
 }
 
 stub_git() {
@@ -170,11 +169,10 @@ EOF
   chmod +x "$BIN/defaults"
 }
 
-stub_all() { stub_engine docker; stub_airlock; stub_df; stub_git; }
-stub_all_but_airlock() { stub_engine docker; stub_df; stub_git; }
-stub_all_but_container_engine() { stub_airlock; stub_df; stub_git; }
-stub_all_but_df() { stub_engine docker; stub_airlock; stub_git; }
-stub_all_but_docker() { stub_engine podman; stub_airlock; stub_df; stub_git; }
+stub_all() { stub_engine docker; stub_airlock; stub_git; }
+stub_all_but_airlock() { stub_engine docker; stub_git; }
+stub_all_but_container_engine() { stub_airlock; stub_git; }
+stub_all_but_docker() { stub_engine podman; stub_airlock; stub_git; }
 
 run_script() {
   ( cd "$WORK" && PATH="$BIN:$TOOLS" HOME="$FAKE_HOME" \
@@ -257,10 +255,6 @@ run_script
 assert_rc 1 "$RC" "no container engine exits 1"
 assert_grep "Neither docker nor podman" "$CASE_DIR/err" "no engine names the dependency"
 
-new_case; stub_all_but_df
-run_script
-assert_rc 1 "$RC" "no df and no gdf exits 1"
-assert_grep "Neither gdf nor df" "$CASE_DIR/err" "no df names the dependency"
 
 section "generated config"
 new_case; stub_all
@@ -649,6 +643,8 @@ assert_grep '^ *'"'"'  \*) PATH="$PATH:/opt/nvm/current/bin" ;;'"'"' \\$' "$CASE
   "profile.d puts node back on PATH after /etc/profile resets it for login shells"
 assert_grep "must source /opt/nvm/nvm.sh" "$CASE_DIR/Dockerfile" \
   "system memory tells Claude Code how to reach nvm from a non-login shell"
+assert_grep "Never add notes about how something used to work" "$CASE_DIR/Dockerfile" \
+  "system memory forbids history in comments and docs"
 assert_grep 'chmod -R a+rwX "$NVM_DIR"' "$CASE_DIR/Dockerfile" "nvm tree stays writable for a non-root VM user"
 assert_grep "en_US.UTF-8 UTF-8' > /etc/locale.gen" "$CASE_DIR/Dockerfile" "Dockerfile seeds locale.gen with that locale"
 assert_grep "locale-gen" "$CASE_DIR/Dockerfile" "Dockerfile generates it"
@@ -688,16 +684,27 @@ else
   fail "git identity stays below the cached install layer" "ARG at $arg_line, install at $install_line"
 fi
 
-section "vm cache handling"
+section "sandbox removal on rebuild"
 new_case; stub_all
-mkdir -p "$WORK/.airlock"; : > "$WORK/.airlock/disk"
+mkdir -p "$WORK/.airlock/sandbox"; : > "$WORK/.airlock/sandbox/disk"
 run_script
-assert_exists "$WORK/.airlock/disk" "a plain run keeps the cached VM disk"
+assert_not_grep "^REMOVE:" "$LOG" "a plain run keeps the sandbox"
+assert_exists "$WORK/.airlock/sandbox/disk" "a plain run leaves a legacy in-project sandbox for airlock to import"
 
 new_case; stub_all
-mkdir -p "$WORK/.airlock"; : > "$WORK/.airlock/disk"
+mkdir -p "$WORK/.airlock/sandbox"; : > "$WORK/.airlock/sandbox/disk"
 run_script -r
-assert_absent "$WORK/.airlock" "-r drops the cached VM disk"
+assert_grep "^REMOVE: remove --force$" "$LOG" "-r removes the sandbox through airlock, without a prompt"
+assert_absent "$WORK/.airlock" "-r also drops a legacy in-project sandbox"
+assert_eq "REMOVE" "$(grep -o '^REMOVE\|^LAUNCH' "$LOG" | head -1)" "the removal happens before the launch"
+assert_exists "$(CONFIG)" "the config is written after the removal, which deletes the local config"
+assert_grep "LAUNCH: start" "$LOG" "-r still launches"
+
+new_case; stub_all
+export STUB_REMOVE_EXIT=1
+run_script -r
+assert_rc 1 "$RC" "a failed removal exits 1"
+assert_not_grep "^LAUNCH:" "$LOG" "a failed removal does not launch on the old sandbox"
 
 section "podman fallback"
 new_case; stub_all_but_docker
@@ -712,26 +719,6 @@ case $shim in
 esac
 assert_absent "$(dirname "$shim")" "shim directory is removed on exit"
 
-section "HOME placement"
-new_case; stub_all
-run_script
-assert_eq "LAUNCH_HOME: $FAKE_HOME" "$(grep '^LAUNCH_HOME:' "$LOG")" "HOME untouched on a plain root"
-
-new_case; stub_all
-export DF_MODE=separate_filesystem
-run_script
-assert_eq "LAUNCH_HOME: /mnt/data" "$(grep '^LAUNCH_HOME:' "$LOG")" "HOME follows the working filesystem"
-
-new_case; stub_all
-export DF_MODE=bsd_rejects_output
-run_script
-assert_eq "LAUNCH_HOME: $FAKE_HOME" "$(grep '^LAUNCH_HOME:' "$LOG")" "BSD df leaves HOME alone"
-
-new_case; stub_all
-export DF_MODE=header_only
-run_script
-assert_eq "LAUNCH_HOME: $FAKE_HOME" "$(grep '^LAUNCH_HOME:' "$LOG")" "empty df answer leaves HOME alone"
-
 section "session log"
 new_case; stub_all
 run_script
@@ -742,7 +729,7 @@ new_case; stub_all
 export STUB_PTY_DUMP='plain first line\r\n\0033]0;title\0007\0033[1mbold\0033[0m styled line\r\n'
 run_script
 assert_grep "last session output" "$CASE_DIR/err" "a dump is followed by its tail"
-assert_grep ".airlock/sandbox/pty.dump" "$CASE_DIR/err" "the tail names the whole log"
+assert_grep "$STUB_BOX/pty.dump" "$CASE_DIR/err" "the tail names the whole log, in the sandbox directory"
 assert_grep "plain first line" "$CASE_DIR/err" "dump text reaches the tail"
 assert_grep "bold styled line" "$CASE_DIR/err" "escape sequences are stripped from around the text"
 assert_not_grep "$(printf '\033')" "$CASE_DIR/err" "no raw escape bytes reach the terminal"
@@ -771,14 +758,21 @@ assert_rc 7 "$RC" "airlock's exit status is preserved past the tail"
 assert_grep "session died" "$CASE_DIR/err" "the tail still prints when airlock fails"
 
 new_case; stub_all
-mkdir -p "$WORK/.airlock/sandbox"
-printf 'earlier session\n' > "$WORK/.airlock/sandbox/pty.dump"
+mkdir -p "$STUB_BOX"
+printf 'earlier session\n' > "$STUB_BOX/pty.dump"
 export STUB_PTY_DUMP='current session\r\n'
 run_script
-assert_grep "earlier session" "$WORK/.airlock/sandbox/pty.dump.previous" "the previous run's log is kept"
-assert_grep "current session" "$WORK/.airlock/sandbox/pty.dump" "the new run's log replaces it"
+assert_grep "earlier session" "$STUB_BOX/pty.dump.previous" "the previous run's log is kept"
+assert_grep "current session" "$STUB_BOX/pty.dump" "the new run's log replaces it"
 assert_grep "current session" "$CASE_DIR/err" "the tail shows the new run"
 assert_not_grep "earlier session" "$CASE_DIR/err" "the rotated log stays out of the tail"
+
+new_case; stub_all
+export STUB_NO_SANDBOX=1 STUB_PTY_DUMP='orphan output\r\n'
+run_script
+assert_rc 0 "$RC" "an unresolvable sandbox directory does not fail the run"
+assert_not_grep "last session output" "$CASE_DIR/err" "no sandbox directory means no tail"
+assert_not_grep "No sandbox for" "$CASE_DIR/err" "airlock info's complaint stays silent"
 
 printf '\n%s\n' "----------------------------------------"
 printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
