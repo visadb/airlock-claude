@@ -116,6 +116,10 @@ resolve_extra_mount() {
     echo "airlock-claude2: $flag: cannot resolve: $dir" >&2
     return 2
   }
+  if [[ $source == *[[:cntrl:]]* ]]; then
+    echo "airlock-claude2: $flag: control characters in the path are not supported: $dir" >&2
+    return 2
+  fi
   if [[ $source == "$PWD" ]]; then
     echo "airlock-claude2: $flag: $dir is the project directory, which is always mounted" >&2
     return 2
@@ -149,7 +153,18 @@ resolve_extra_mounts() {
 
 without_mounts_block() {
   local file=$1
-  sed '/^# BEGIN airlock-claude2 mounts/,/^# END airlock-claude2 mounts$/d' "$file"
+  local line inside=
+  [[ -f $file ]] || return 1
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ -n $inside ]]; then
+      if [[ $line == "# END airlock-claude2 mounts" ]]; then inside=; fi
+    elif [[ $line == "# BEGIN airlock-claude2 mounts"* ]]; then
+      inside=1
+    else
+      printf '%s\n' "$line"
+    fi
+  done < "$file" || return 1
+  [[ -z $inside ]] || return 2
 }
 
 project_config_present() {
@@ -160,7 +175,7 @@ project_config_present() {
   for ext in json yaml yml; do
     [[ -e airlock.local.$ext ]] && { printf '1\n'; return 0; }
   done
-  if [[ -f airlock.local.toml ]] && [[ -n $(without_mounts_block airlock.local.toml | tr -d '[:space:]') ]]; then
+  if [[ -f airlock.local.toml ]] && [[ -n $(without_mounts_block airlock.local.toml 2>/dev/null | tr -d '[:space:]') ]]; then
     printf '1\n'
   fi
   return 0
@@ -211,12 +226,19 @@ extra_mounts_block() {
 
 write_mounts_block() {
   local block=$1
-  local kept= content
+  local kept= content status
   if [[ -e airlock.local.toml ]]; then
-    kept=$(without_mounts_block airlock.local.toml 2>/dev/null) || {
+    kept=$(without_mounts_block airlock.local.toml 2>/dev/null); status=$?
+    if (( status == 2 )); then
+      echo "airlock-claude2: airlock.local.toml has a '# BEGIN airlock-claude2 mounts' line without its '# END airlock-claude2 mounts' line; fix or remove the block by hand" >&2
+      return 1
+    elif (( status != 0 )); then
       echo "airlock-claude2: could not read airlock.local.toml in $PWD" >&2
       return 1
-    }
+    fi
+    if [[ -z $block && $kept == "$(cat airlock.local.toml)" ]]; then
+      return 0
+    fi
   fi
   content=$kept
   [[ -n $block ]] && content=${content:+$content$'\n\n'}$block

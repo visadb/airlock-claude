@@ -568,6 +568,51 @@ assert_rc 1 "$RC" "an unreadable airlock.local.toml exits 1"
 assert_grep "could not read airlock.local.toml" "$CASE_DIR/err" "an unreadable airlock.local.toml says so"
 assert_not_grep "LAUNCH:" "$LOG" "an unreadable airlock.local.toml does not launch"
 
+for flags in with-mount without-flags; do
+  new_case; stub_all
+  mkdir -p "$CASE_DIR/other"
+  printf '[vm]\ncpus = 2\n# BEGIN airlock-claude2 mounts (rewritten on every airlock-claude2 run)\n[mounts."old"]\n[after]\nkey = 1\n' > "$(CONFIG)"
+  cp "$(CONFIG)" "$CASE_DIR/before"
+  if [ "$flags" = with-mount ]; then run_script --mount-rw "$CASE_DIR/other"; else run_script; fi
+  assert_rc 1 "$RC" "a BEGIN line without its END line exits 1 ($flags)"
+  assert_grep "without its '# END" "$CASE_DIR/err" "a BEGIN line without its END line is named in the message ($flags)"
+  if cmp -s "$(CONFIG)" "$CASE_DIR/before"; then pass "a BEGIN line without its END line leaves the file byte-identical ($flags)"
+  else fail "a BEGIN line without its END line leaves the file byte-identical ($flags)"; fi
+  assert_not_grep "LAUNCH:" "$LOG" "a BEGIN line without its END line does not launch ($flags)"
+done
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+printf '[vm]\ncpus = 2\n\n# BEGIN airlock-claude2 mounts (rewritten on every airlock-claude2 run)\n[mounts."old"]\nsource = "/x/old"\n# END airlock-claude2 mounts\n[after]\nkey = 1\n' > "$(CONFIG)"
+run_script --mount-rw "$CASE_DIR/other"
+assert_grep '^\[after\]$' "$(CONFIG)" "content after the old block is kept"
+assert_grep '^key = 1$' "$(CONFIG)" "keys after the old block are kept"
+assert_not_grep '"old"' "$(CONFIG)" "the old block's mounts are dropped"
+assert_eq "1" "$(grep -c '^# BEGIN airlock-claude2 mounts' "$(CONFIG)")" "exactly one block remains after a rewrite"
+assert_eq "# END airlock-claude2 mounts" "$(tail -n 1 "$(CONFIG)")" "the new block is at the end of the file"
+
+new_case; stub_all
+printf '# BEGIN airlock-claude2 mounts (x)\n[mounts."a"]\n# END airlock-claude2 mounts\n# BEGIN airlock-claude2 mounts (x)\n[mounts."b"]\n# END airlock-claude2 mounts\n' > "$(CONFIG)"
+run_script
+assert_rc 0 "$RC" "a file of two blocks is accepted"
+assert_absent "$(CONFIG)" "both blocks are stripped, leaving nothing, so the file is removed"
+
+new_case; stub_all
+printf '[vm]\ncpus = 2\n\n\n' > "$(CONFIG)"
+cp "$(CONFIG)" "$CASE_DIR/before"
+run_script
+assert_rc 0 "$RC" "a run without flags on a hand-written file exits 0"
+if cmp -s "$(CONFIG)" "$CASE_DIR/before"; then pass "a hand-written file with no block is byte-identical after a run without flags"
+else fail "a hand-written file with no block is byte-identical after a run without flags"; fi
+
+new_case; stub_all
+mkdir "$CASE_DIR/bad"$'\n'"name"
+run_script --mount-rw "$CASE_DIR/bad"$'\n'"name"
+assert_rc 2 "$RC" "a mount path with a newline exits 2"
+assert_grep "control characters" "$CASE_DIR/err" "a mount path with a newline says why"
+assert_absent "$(CONFIG)" "a mount path with a newline writes nothing"
+assert_not_grep "LAUNCH:" "$LOG" "a mount path with a newline does not launch"
+
 section "mounts on a first run"
 new_case; stub_all
 mkdir -p "$CASE_DIR/other"

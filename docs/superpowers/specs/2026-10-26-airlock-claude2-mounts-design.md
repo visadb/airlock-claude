@@ -40,6 +40,12 @@ absent and no mounts were given. A read or write failure prints
 `airlock-claude2: could not read|write airlock.local.toml in <dir>` and
 exits 1 before the launch.
 
+A `# BEGIN airlock-claude2 mounts` line without its `# END` line is
+refused (message on stderr, exit 1, file untouched) rather than stripped
+to the end of the file. A run without mounts leaves a file that holds no
+block byte-identical. A control character in a mount path is rejected
+(exit 2), since a TOML basic string cannot carry it.
+
 TOML escaping of the key, source and target: `\` → `\\`, `"` → `\"`.
 
 ## First-run refusal
