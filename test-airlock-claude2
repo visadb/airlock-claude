@@ -326,6 +326,35 @@ assert_grep "/etc/claude-code/CLAUDE.md" "$(SESSION_SCRIPT)" "-T still writes th
 assert_eq 'exec "$@"' "$(tail -n 1 "$(SESSION_SCRIPT)")" "-T ends with a plain exec"
 
 new_case; stub_all
+run_script -T
+mkdir -p "$CASE_DIR/etc"
+sed "s#/etc/#$CASE_DIR/etc/#g" "$(SESSION_SCRIPT)" > "$CASE_DIR/prelude"
+bash -c "$(cat "$CASE_DIR/prelude")" airlock-claude2 true > "$CASE_DIR/prelude.out" 2>&1
+assert_rc 0 "$?" "running the prelude against a substitute /etc succeeds and reaches the handoff"
+assert_exists "$CASE_DIR/etc/tmux.conf" "running the prelude writes the tmux config"
+assert_exists "$CASE_DIR/etc/claude-code/managed-settings.json" "running the prelude writes the managed settings"
+assert_exists "$CASE_DIR/etc/claude-code/CLAUDE.md" "running the prelude writes the managed memory"
+EXPECTED_TMUX_CONF=$(cat <<'EOF'
+set -g mouse on
+set -g set-clipboard on
+set -as terminal-features ",*:clipboard"
+set -g default-terminal "tmux-256color"
+EOF
+)
+assert_eq "$EXPECTED_TMUX_CONF" "$(cat "$CASE_DIR/etc/tmux.conf")" "the written tmux config is exactly the four settings"
+assert_grep '"defaultMode": "bypassPermissions"' "$CASE_DIR/etc/claude-code/managed-settings.json" \
+  "the written managed settings bypass permission prompts"
+assert_grep 'ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT' "$CASE_DIR/etc/claude-code/CLAUDE.md" \
+  "the written memory keeps & and ~ through both heredoc layers"
+assert_grep 'kwargs\["ssl_context"\] = ctx' "$CASE_DIR/etc/claude-code/CLAUDE.md" \
+  "the written memory keeps quotes and brackets through both heredoc layers"
+assert_eq "the commit message, and nowhere else." "$(tail -n 1 "$CASE_DIR/etc/claude-code/CLAUDE.md")" \
+  "the written memory runs to its last line, with nothing swallowed after it"
+assert_not_grep "^\(TMUX_CONF\|SETTINGS\|CLAUDE_MD\)$" "$CASE_DIR/etc/tmux.conf" "no heredoc terminator leaks into the tmux config"
+assert_not_grep "^\(TMUX_CONF\|SETTINGS\|CLAUDE_MD\)$" "$CASE_DIR/etc/claude-code/managed-settings.json" "no heredoc terminator leaks into the managed settings"
+assert_not_grep "^\(TMUX_CONF\|SETTINGS\|CLAUDE_MD\)$" "$CASE_DIR/etc/claude-code/CLAUDE.md" "no heredoc terminator leaks into the managed memory"
+
+new_case; stub_all
 run_script -x -- bash
 assert_grep "/etc/claude-code/managed-settings.json" "$(SESSION_SCRIPT)" "-x sessions get the same prelude"
 assert_grep "apk add --quiet tmux" "$(SESSION_SCRIPT)" "-x under tmux installs tmux too"
@@ -353,6 +382,7 @@ export STUB_REMOVE_EXIT=1
 run_script -r
 assert_rc 1 "$RC" "a failed removal exits 1"
 assert_not_grep "^LAUNCH:" "$LOG" "a failed removal does not launch on the old sandbox"
+assert_grep "not launching on the old sandbox" "$CASE_DIR/err" "a failed removal says why the run stops"
 
 section "session log"
 new_case; stub_all

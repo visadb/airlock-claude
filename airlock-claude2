@@ -77,7 +77,7 @@ validate_exec_usage() {
 
 require_airlock() {
   if ! command -v airlock >/dev/null 2>&1; then
-    echo "airlock not found in PATH" >&2
+    echo "airlock-claude2: airlock not found in PATH" >&2
     return 1
   fi
 }
@@ -85,7 +85,10 @@ require_airlock() {
 remove_sandbox_on_rebuild() {
   local rebuild=$1
   [[ -n $rebuild ]] || return 0
-  airlock remove --force >&2 || return 1
+  if ! airlock remove --force >&2; then
+    echo "airlock-claude2: airlock remove failed, not launching on the old sandbox" >&2
+    return 1
+  fi
 }
 
 sandbox_dir() {

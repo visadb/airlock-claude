@@ -108,10 +108,15 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   what the user sees rather than "tmux: not found". The `alpine` pack's
   `allow-apk` (default on) is what lets `apk add` through deny-by-default.
 - **The wrapper is `bash -c`, not `sh -c`, because of `printf '%q '`.**
-  tmux joins its command words with spaces and hands them to a shell, so
-  a multi-word `-p "run the tests"` would split into words. Bash's `%q`
-  re-quotes each word for that shell. The `claude` pack installs `bash` on
-  Alpine, so it is always there.
+  tmux runs its command through a shell only when it receives a single
+  command argument (given several words it calls `execvp` directly), and
+  the handoff passes one string so the path is the same for every command.
+  `printf '%q '` re-quotes each word for that shell, so a multi-word
+  `-p "run the tests"` stays one word. The shell that reads the string is
+  tmux's `default-shell` (busybox `ash` for root on Alpine), so a word
+  containing a newline, which `%q` writes as `$'…'`, depends on that shell
+  understanding `$'…'`; busybox `ash` does. The `claude` pack installs
+  `bash` on Alpine, so the wrapper is always there.
 - **`/etc/claude-code/managed-settings.json` is what puts the session in
   `bypassPermissions`**, with `skipDangerousModePermissionPrompt` so a new
   sandbox doesn't ask. Managed settings are the highest-precedence source,
@@ -183,12 +188,12 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   needs no `airlock`, no network, and finishes in about a second. `-v`
   echoes each case's captured output. Add cases in the same shape when
   you add behavior.
-- What the suite cannot reach: anything that boots a VM. The prelude is
-  checked as *text* (it reaches `bash -c`, parses under `bash -n`, writes
-  the expected files, ends with the expected `exec`); nothing verifies
-  that `apk add tmux` succeeds, that the files land, or that airlock
-  accepts the launch. For those, run `./airlock-claude2` on a machine
-  with the `airlock` CLI.
+- What the suite cannot reach: anything that boots a VM. The prelude
+  reaches `bash -c` as a file, parses under `bash -n`, and is run against
+  a substitute `/etc`, where the suite checks the files it writes and the
+  `exec` it ends with. Only `apk add tmux`, tmux itself and airlock's
+  acceptance of the launch remain outside the suite. For those, run
+  `./airlock-claude2` on a machine with the `airlock` CLI.
 - `README2.md` is the user-facing description. A change to flags or the
   launch line usually needs an edit there too.
 

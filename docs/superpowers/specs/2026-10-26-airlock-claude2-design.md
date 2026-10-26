@@ -188,7 +188,7 @@ temp work dir per case (never this repo), `PATH` rebuilt per case,
 stubs driven by exported env vars reset in `new_case`, labels as
 claims.
 
-Stubs: `airlock` only. `bash` is a real tool, linked into `TOOLS`.
+Stubs: `airlock` only; `TOOLS` holds `sed tail cat tr mv rm mkdir`.
 - `airlock`: `info --json` prints a fake sandbox JSON with `"dir":
   "$STUB_BOX"`, or exits 1 with the "No sandbox for" line under
   `STUB_NO_SANDBOX`; `remove` logs `REMOVE: ...`, removes `$STUB_BOX`,
@@ -197,8 +197,8 @@ Stubs: `airlock` only. `bash` is a real tool, linked into `TOOLS`.
   writes `STUB_PTY_DUMP` to `$STUB_BOX/pty.dump`, exits `STUB_EXIT`.
   The stub also writes the `bash -c` script argument to
   `$CASE_DIR/session-script` for the text checks.
-- `bash` in `TOOLS` is the real bash (the script's own interpreter and
-  `bash -n` for the prelude).
+- `bash -n` for the prelude runs on the host `PATH`; the script's shebang
+  is absolute.
 
 Case groups:
 - syntax: `bash -n` on the script.
@@ -218,7 +218,9 @@ Case groups:
   `CLAUDE.md` with the 403 line, the revert reminder,
   `VERIFY_X509_STRICT`, the virtualenv line, the history rule, the apk
   note; no `nvm`; `exec tmux -u new-session -A -s claude` with
-  `printf '%q '` when tmux is on, `exec "$@"` when off.
+  `printf '%q '` when tmux is on, `exec "$@"` when off; under `-T` the
+  prelude is run against a substitute `/etc` and the written files are
+  checked.
 - rebuild: plain run does not remove; `-r` logs `remove --force`
   before `LAUNCH`; failed remove exits 1 without a launch.
 - session log: all cases from the old suite carried over.
