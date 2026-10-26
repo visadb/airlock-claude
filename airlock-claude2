@@ -1,0 +1,114 @@
+#!/bin/bash
+
+usage() {
+  cat <<'USAGE'
+Usage: airlock-claude2 [-M|--no-monitor] [-T|--no-tmux] [-r|--rebuild]
+                       [-h|--help] [-- <claude args...>]
+       airlock-claude2 [-M|--no-monitor] [-T|--no-tmux] [-r|--rebuild]
+                       -x|--exec -- <command...>
+
+Runs Claude Code sandboxed in an airlock VM in the current directory, with
+network access denied by default. On a project's first run airlock's
+setup wizard asks which packs or template to use: pick alpine and claude, or a
+template built on them.
+
+The session runs inside tmux, under airlock's monitor TUI, by default.
+Before it starts, tmux is installed into the sandbox if missing, and the
+tmux config, Claude Code's managed settings (bypass permissions) and
+managed CLAUDE.md are written under /etc.
+
+When the session ends, the last lines of its output are printed again —
+the monitor and tmux restore the host screen on exit, taking the session's
+final words with them — and the whole terminal log of the run is kept as
+pty.dump in the sandbox directory (`airlock info` shows it), with the
+previous run's log beside it as pty.dump.previous.
+
+  -M, --no-monitor  Run without the monitor TUI, handing the host terminal
+                    straight to the session.
+  -T, --no-tmux     Run claude directly instead of inside tmux.
+  -x, --exec        Run the command given after -- instead of claude, in
+                    the same VM and, by default, the same tmux and monitor
+                    wrappers.
+  -r, --rebuild     Remove the project's sandbox (`airlock remove`) before
+                    starting, so airlock makes a fresh one and the setup
+                    wizard runs again. Anything installed inside the VM is
+                    lost; the persisted Claude settings and login are not.
+  -h, --help        Show this help.
+
+Arguments after -- are passed to claude verbatim:
+
+  airlock-claude2 -- --resume
+  airlock-claude2 -M -- -p "run the tests"
+
+With -x, the arguments after -- replace claude entirely:
+
+  airlock-claude2 -x -- bash
+  airlock-claude2 -M -T -x -- python3 -m http.server
+USAGE
+}
+
+parse_args() {
+  MONITOR=1 USE_TMUX=1 EXEC= REBUILD= SHOW_USAGE= CLAUDE_ARGS=()
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --) shift; CLAUDE_ARGS=("$@"); return 0 ;;
+      -M|--no-monitor) MONITOR= ;;
+      -T|--no-tmux) USE_TMUX= ;;
+      -x|--exec) EXEC=1 ;;
+      -r|--rebuild) REBUILD=1 ;;
+      -h|--help) SHOW_USAGE=1; break ;;
+      *)
+        echo "airlock-claude2: unknown option: $1" >&2
+        echo "Try 'airlock-claude2 --help'." >&2
+        return 2 ;;
+    esac
+    shift
+  done
+}
+
+validate_exec_usage() {
+  local exec_given=$1 command_word_count=$2
+  [[ -n $exec_given ]] || return 0
+  if (( command_word_count == 0 )); then
+    echo "airlock-claude2: --exec needs a command after --" >&2
+    return 2
+  fi
+}
+
+require_airlock() {
+  if ! command -v airlock >/dev/null 2>&1; then
+    echo "airlock not found in PATH" >&2
+    return 1
+  fi
+}
+
+session_script() {
+  local use_tmux=$1
+  if [[ -n $use_tmux ]]; then
+    cat <<'HANDOFF'
+exec tmux -u new-session -A -s claude "$(printf '%q ' "$@")"
+HANDOFF
+  else
+    cat <<'HANDOFF'
+exec "$@"
+HANDOFF
+  fi
+}
+
+parse_args "$@" || exit $?
+[[ -n $SHOW_USAGE ]] && { usage; exit 0; }
+
+validate_exec_usage "$EXEC" "${#CLAUDE_ARGS[@]}" || exit $?
+
+require_airlock || exit 1
+
+SESSION_SCRIPT=$(session_script "$USE_TMUX")
+if [[ -n $EXEC ]]; then
+  SESSION_COMMAND=("${CLAUDE_ARGS[@]}")
+else
+  SESSION_COMMAND=(claude "${CLAUDE_ARGS[@]}")
+fi
+
+AIRLOCK_PTY_DUMP=1 airlock start ${MONITOR:+--monitor} --network deny-by-default -- bash -c "$SESSION_SCRIPT" airlock-claude2 "${SESSION_COMMAND[@]}"
+AIRLOCK_EXIT=$?
+exit "$AIRLOCK_EXIT"
