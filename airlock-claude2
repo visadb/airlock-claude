@@ -3,8 +3,10 @@
 usage() {
   cat <<'USAGE'
 Usage: airlock-claude2 [-M|--no-monitor] [-T|--no-tmux] [-r|--rebuild]
+                       [--mount-rw <dir>] [--mount-ro <dir>]
                        [-h|--help] [-- <claude args...>]
        airlock-claude2 [-M|--no-monitor] [-T|--no-tmux] [-r|--rebuild]
+                       [--mount-rw <dir>] [--mount-ro <dir>]
                        -x|--exec -- <command...>
 
 Runs Claude Code sandboxed in an airlock VM in the current directory, with
@@ -26,6 +28,14 @@ previous run's log beside it as pty.dump.previous.
   -M, --no-monitor  Run without the monitor TUI, handing the host terminal
                     straight to the session.
   -T, --no-tmux     Run claude directly instead of inside tmux.
+  --mount-rw <dir>  Mount another host directory into the VM, read-write,
+                    under the project directory as its basename: e.g.
+                    --mount-rw ../other-project appears as ./other-project
+                    in the session. Repeatable. The mounts are kept in a
+                    marked block of airlock.local.toml, rewritten on every
+                    run, and need a sandbox to exist already (run once
+                    without mounts first, so the setup wizard can run).
+  --mount-ro <dir>  Like --mount-rw, but read-only.
   -x, --exec        Run the command given after -- instead of claude, in
                     the same VM and, by default, the same tmux and monitor
                     wrappers.
@@ -48,12 +58,21 @@ USAGE
 }
 
 parse_args() {
-  MONITOR=1 USE_TMUX=1 EXEC= REBUILD= SHOW_USAGE= CLAUDE_ARGS=()
+  MONITOR=1 USE_TMUX=1 EXEC= REBUILD= SHOW_USAGE= CLAUDE_ARGS=() MOUNTS_RW=() MOUNTS_RO=()
   while [[ $# -gt 0 ]]; do
     case $1 in
       --) shift; CLAUDE_ARGS=("$@"); return 0 ;;
       -M|--no-monitor) MONITOR= ;;
       -T|--no-tmux) USE_TMUX= ;;
+      --mount-rw|--mount-ro)
+        if [[ $# -lt 2 ]]; then
+          echo "airlock-claude2: $1 needs a directory" >&2
+          return 2
+        fi
+        if [[ $1 == --mount-rw ]]; then MOUNTS_RW+=("$2"); else MOUNTS_RO+=("$2"); fi
+        shift ;;
+      --mount-rw=*) MOUNTS_RW+=("${1#--mount-rw=}") ;;
+      --mount-ro=*) MOUNTS_RO+=("${1#--mount-ro=}") ;;
       -x|--exec) EXEC=1 ;;
       -r|--rebuild) REBUILD=1 ;;
       -h|--help) SHOW_USAGE=1; break ;;
@@ -82,6 +101,85 @@ require_airlock() {
   fi
 }
 
+resolve_extra_mount() {
+  local flag=$1 dir=$2 read_only=$3
+  local source target existing
+  if [[ -z $dir ]]; then
+    echo "airlock-claude2: $flag needs a directory" >&2
+    return 2
+  fi
+  if [[ ! -d $dir ]]; then
+    echo "airlock-claude2: $flag: not a directory: $dir" >&2
+    return 2
+  fi
+  source=$(CDPATH= cd -- "$dir" 2>/dev/null && pwd) || {
+    echo "airlock-claude2: $flag: cannot resolve: $dir" >&2
+    return 2
+  }
+  if [[ $source == "$PWD" ]]; then
+    echo "airlock-claude2: $flag: $dir is the project directory, which is always mounted" >&2
+    return 2
+  fi
+  target=${source##*/}
+  if [[ -z $target ]]; then
+    echo "airlock-claude2: $flag: cannot mount the filesystem root" >&2
+    return 2
+  fi
+  for existing in ${MOUNT_TARGETS[@]+"${MOUNT_TARGETS[@]}"}; do
+    if [[ $existing == "$target" ]]; then
+      echo "airlock-claude2: two mounts would both appear as ./$target; rename one on the host" >&2
+      return 2
+    fi
+  done
+  MOUNT_SOURCES+=("$source")
+  MOUNT_TARGETS+=("$target")
+  MOUNT_READ_ONLY+=("$read_only")
+}
+
+resolve_extra_mounts() {
+  MOUNT_SOURCES=() MOUNT_TARGETS=() MOUNT_READ_ONLY=()
+  local dir
+  for dir in ${MOUNTS_RW[@]+"${MOUNTS_RW[@]}"}; do
+    resolve_extra_mount --mount-rw "$dir" false || return $?
+  done
+  for dir in ${MOUNTS_RO[@]+"${MOUNTS_RO[@]}"}; do
+    resolve_extra_mount --mount-ro "$dir" true || return $?
+  done
+}
+
+without_mounts_block() {
+  local file=$1
+  sed '/^# BEGIN airlock-claude2 mounts/,/^# END airlock-claude2 mounts$/d' "$file"
+}
+
+project_config_present() {
+  local ext
+  for ext in toml json yaml yml; do
+    [[ -e airlock.$ext ]] && { printf '1\n'; return 0; }
+  done
+  for ext in json yaml yml; do
+    [[ -e airlock.local.$ext ]] && { printf '1\n'; return 0; }
+  done
+  if [[ -f airlock.local.toml ]] && [[ -n $(without_mounts_block airlock.local.toml | tr -d '[:space:]') ]]; then
+    printf '1\n'
+  fi
+  return 0
+}
+
+sandbox_dir() {
+  airlock info --json 2>/dev/null | sed -n 's/^ *"dir": *"\(.*\)",\{0,1\}$/\1/p'
+}
+
+refuse_mounts_on_first_run() {
+  local mount_count=$1 rebuild=$2 sandbox=$3 has_config=$4
+  (( mount_count > 0 )) || return 0
+  [[ -z $has_config ]] || return 0
+  if [[ -n $rebuild || -z $sandbox ]]; then
+    echo "airlock-claude2: --mount-rw/--mount-ro need a sandbox to exist already: run once without mounts, so airlock's setup wizard can create it" >&2
+    return 2
+  fi
+}
+
 remove_sandbox_on_rebuild() {
   local rebuild=$1
   [[ -n $rebuild ]] || return 0
@@ -91,8 +189,45 @@ remove_sandbox_on_rebuild() {
   fi
 }
 
-sandbox_dir() {
-  airlock info --json 2>/dev/null | sed -n 's/^ *"dir": *"\(.*\)",\{0,1\}$/\1/p'
+toml_escaped() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '%s\n' "$s"
+}
+
+extra_mounts_block() {
+  (( ${#MOUNT_SOURCES[@]} > 0 )) || return 0
+  local i source target
+  printf '# BEGIN airlock-claude2 mounts (rewritten on every airlock-claude2 run)\n'
+  for ((i = 0; i < ${#MOUNT_SOURCES[@]}; i++)); do
+    source=$(toml_escaped "${MOUNT_SOURCES[i]}")
+    target=$(toml_escaped "${MOUNT_TARGETS[i]}")
+    printf '[mounts."%s"]\nsource = "%s"\ntarget = "%s"\nread_only = %s\n' \
+      "$target" "$source" "$target" "${MOUNT_READ_ONLY[i]}"
+  done
+  printf '# END airlock-claude2 mounts\n'
+}
+
+write_mounts_block() {
+  local block=$1
+  local kept= content
+  if [[ -e airlock.local.toml ]]; then
+    kept=$(without_mounts_block airlock.local.toml 2>/dev/null) || {
+      echo "airlock-claude2: could not read airlock.local.toml in $PWD" >&2
+      return 1
+    }
+  fi
+  content=$kept
+  [[ -n $block ]] && content=${content:+$content$'\n\n'}$block
+  if [[ -z $(printf '%s' "$content" | tr -d '[:space:]') ]]; then
+    [[ -e airlock.local.toml ]] && rm -f airlock.local.toml
+    return 0
+  fi
+  printf '%s\n' "$content" > airlock.local.toml || {
+    echo "airlock-claude2: could not write airlock.local.toml in $PWD" >&2
+    return 1
+  }
 }
 
 keep_previous_pty_dump() {
@@ -245,7 +380,12 @@ validate_exec_usage "$EXEC" "${#CLAUDE_ARGS[@]}" || exit $?
 
 require_airlock || exit 1
 
+resolve_extra_mounts || exit $?
+refuse_mounts_on_first_run "${#MOUNT_SOURCES[@]}" "$REBUILD" "$(sandbox_dir)" "$(project_config_present)" || exit $?
+
 remove_sandbox_on_rebuild "$REBUILD" || exit 1
+
+write_mounts_block "$(extra_mounts_block)" || exit 1
 
 SANDBOX_DIR=$(sandbox_dir)
 [[ -n $SANDBOX_DIR ]] && keep_previous_pty_dump "$SANDBOX_DIR/pty.dump"

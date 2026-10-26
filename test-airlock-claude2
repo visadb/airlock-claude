@@ -136,6 +136,7 @@ run_script() {
 }
 
 SESSION_SCRIPT() { echo "$CASE_DIR/session-script"; }
+CONFIG() { echo "$WORK/airlock.local.toml"; }
 
 section "syntax"
 if bash -n "$SCRIPT" 2>"$TMPROOT/syntax.err"; then
@@ -438,6 +439,182 @@ run_script
 assert_rc 0 "$RC" "an unresolvable sandbox directory does not fail the run"
 assert_not_grep "last session output" "$CASE_DIR/err" "no sandbox directory means no tail"
 assert_not_grep "No sandbox for" "$CASE_DIR/err" "airlock info's complaint stays silent"
+
+section "extra mounts"
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 0 "$RC" "--mount-rw with a directory exits 0"
+assert_grep '^\[mounts."other"\]$' "$(CONFIG)" "--mount-rw adds a mounts table named after the directory"
+assert_grep "^source = \"$CASE_DIR/other\"\$" "$(CONFIG)" "the mount's source is the host directory"
+assert_grep '^target = "other"$' "$(CONFIG)" "the mount's target is the basename, relative to the project"
+assert_grep '^read_only = false$' "$(CONFIG)" "--mount-rw mounts read-write"
+assert_eq "# BEGIN airlock-claude2 mounts (rewritten on every airlock-claude2 run)" "$(sed -n 1p "$(CONFIG)")" \
+  "the block opens with its marker, which says the block is the script's"
+assert_eq "# END airlock-claude2 mounts" "$(tail -n 1 "$(CONFIG)")" "the block closes with its marker"
+assert_grep "^LAUNCH:" "$LOG" "--mount-rw still launches"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/reference"
+run_script --mount-ro "$CASE_DIR/reference"
+assert_grep '^\[mounts."reference"\]$' "$(CONFIG)" "--mount-ro adds a mounts table"
+assert_grep '^read_only = true$' "$(CONFIG)" "--mount-ro mounts read-only"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/one" "$CASE_DIR/two" "$CASE_DIR/three"
+run_script --mount-rw "$CASE_DIR/one" --mount-rw "$CASE_DIR/two" --mount-ro "$CASE_DIR/three"
+assert_grep '^\[mounts."one"\]$' "$(CONFIG)" "the flags are repeatable (first)"
+assert_grep '^\[mounts."two"\]$' "$(CONFIG)" "the flags are repeatable (second)"
+assert_grep '^\[mounts."three"\]$' "$(CONFIG)" "read-write and read-only mounts combine"
+assert_eq "false
+false
+true" "$(sed -n 's/^read_only = //p' "$(CONFIG)")" "each mount keeps its own mode"
+assert_eq "1" "$(grep -c '^# BEGIN airlock-claude2 mounts' "$(CONFIG)")" "all mounts share one block"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/joined"
+run_script --mount-ro="$CASE_DIR/joined"
+assert_grep '^\[mounts."joined"\]$' "$(CONFIG)" "--mount-ro=dir is the joined form"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/sibling"
+run_script --mount-rw ../sibling
+assert_grep "^source = \"$CASE_DIR/sibling\"\$" "$(CONFIG)" "a relative directory is resolved to its host path"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/with space" "$CASE_DIR/"'qu"ote'
+run_script --mount-rw "$CASE_DIR/with space" --mount-ro "$CASE_DIR/"'qu"ote'
+assert_grep '^\[mounts."with space"\]$' "$(CONFIG)" "a name with a space stays one TOML key"
+assert_grep '^\[mounts."qu\\"ote"\]$' "$(CONFIG)" "a double quote in the name is escaped in the key"
+assert_grep 'source = ".*qu\\"ote"' "$(CONFIG)" "a double quote in the path is escaped in the source"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+run_script --mount-ro "$CASE_DIR/other" -x -- bash
+assert_rc 0 "$RC" "mounts combine with -x"
+assert_grep '^\[mounts."other"\]$' "$(CONFIG)" "the mount reaches the config with -x"
+
+new_case; stub_all
+run_script --mount-rw
+assert_rc 2 "$RC" "--mount-rw without a value exits 2"
+assert_grep "needs a directory" "$CASE_DIR/err" "missing mount value explains itself"
+
+new_case; stub_all
+run_script --mount-ro "$CASE_DIR/does-not-exist"
+assert_rc 2 "$RC" "a nonexistent mount directory exits 2"
+assert_grep "not a directory" "$CASE_DIR/err" "a nonexistent mount directory explains itself"
+assert_absent "$(CONFIG)" "a bad mount writes no config"
+assert_not_grep "LAUNCH:" "$LOG" "a bad mount does not launch"
+
+new_case; stub_all
+touch "$CASE_DIR/plain-file"
+run_script --mount-rw "$CASE_DIR/plain-file"
+assert_rc 2 "$RC" "a file as a mount source exits 2"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/a/same" "$CASE_DIR/b/same"
+run_script --mount-rw "$CASE_DIR/a/same" --mount-ro "$CASE_DIR/b/same"
+assert_rc 2 "$RC" "two mounts with one basename exit 2"
+assert_grep "both appear as ./same" "$CASE_DIR/err" "the basename collision is named"
+
+new_case; stub_all
+run_script --mount-rw .
+assert_rc 2 "$RC" "mounting the project directory itself exits 2"
+assert_grep "always mounted" "$CASE_DIR/err" "the project-directory mount explains itself"
+
+new_case; stub_all
+run_script --mount-ro /
+assert_rc 2 "$RC" "mounting the filesystem root exits 2"
+
+section "mounts and the local config file"
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+printf '[vm]\ncpus = 2\n' > "$(CONFIG)"
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 0 "$RC" "an existing airlock.local.toml is accepted"
+assert_eq "[vm]" "$(sed -n 1p "$(CONFIG)")" "content already in the file stays first"
+assert_grep '^cpus = 2$' "$(CONFIG)" "content already in the file is kept"
+assert_eq "# END airlock-claude2 mounts" "$(tail -n 1 "$(CONFIG)")" "the block is appended after it"
+assert_eq "" "$(sed -n 3p "$(CONFIG)")" "one blank line separates the kept content from the block"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/one" "$CASE_DIR/two"
+run_script --mount-rw "$CASE_DIR/one"
+run_script --mount-ro "$CASE_DIR/two"
+assert_not_grep '"one"' "$(CONFIG)" "the next run's block replaces the previous mounts"
+assert_grep '^\[mounts."two"\]$' "$(CONFIG)" "the next run's mounts are in"
+assert_eq "1" "$(grep -c '^# BEGIN airlock-claude2 mounts' "$(CONFIG)")" "replacing leaves one block, not two"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+printf '[vm]\ncpus = 2\n' > "$(CONFIG)"
+run_script --mount-rw "$CASE_DIR/other"
+run_script
+assert_rc 0 "$RC" "a run without mount flags exits 0"
+assert_grep '^cpus = 2$' "$(CONFIG)" "a run without mount flags keeps the content that is not the script's"
+assert_not_grep "airlock-claude2 mounts" "$(CONFIG)" "a run without mount flags removes the block"
+assert_not_grep "mounts\." "$(CONFIG)" "no mount survives a run without mount flags"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+run_script --mount-rw "$CASE_DIR/other"
+run_script
+assert_absent "$(CONFIG)" "a file that held only the block is removed, so it cannot suppress the wizard later"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other" "$(CONFIG)"
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 1 "$RC" "an unreadable airlock.local.toml exits 1"
+assert_grep "could not read airlock.local.toml" "$CASE_DIR/err" "an unreadable airlock.local.toml says so"
+assert_not_grep "LAUNCH:" "$LOG" "an unreadable airlock.local.toml does not launch"
+
+section "mounts on a first run"
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+export STUB_NO_SANDBOX=1
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 2 "$RC" "mounts on a project with no sandbox exit 2"
+assert_grep "run once without mounts" "$CASE_DIR/err" "the refusal says the wizard has to create the sandbox first"
+assert_absent "$(CONFIG)" "the refusal writes no file, so the wizard is not suppressed"
+assert_not_grep "LAUNCH:" "$LOG" "the refusal does not launch"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+export STUB_NO_SANDBOX=1
+printf '[packs]\nalpine = { version = "1" }\n' > "$WORK/airlock.toml"
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 0 "$RC" "mounts on a first run are fine when an airlock.toml keeps the wizard away"
+assert_grep '^\[mounts."other"\]$' "$(CONFIG)" "the block is written next to the project's airlock.toml"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+export STUB_NO_SANDBOX=1
+printf '[vm]\ncpus = 2\n' > "$(CONFIG)"
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 0 "$RC" "mounts on a first run are fine when a hand-written airlock.local.toml keeps the wizard away"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+export STUB_NO_SANDBOX=1
+printf '%s\n' '# BEGIN airlock-claude2 mounts (rewritten on every airlock-claude2 run)' '[mounts."old"]' \
+  'source = "/old"' 'target = "old"' 'read_only = false' '# END airlock-claude2 mounts' > "$(CONFIG)"
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 2 "$RC" "an old block of the script's own does not count as config that keeps the wizard away"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other" "$STUB_BOX"; : > "$STUB_BOX/disk.img"
+run_script -r --mount-rw "$CASE_DIR/other"
+assert_rc 2 "$RC" "-r with mounts exits 2, since the rebuilt sandbox needs the wizard"
+assert_not_grep "^REMOVE:" "$LOG" "-r with mounts is refused before anything is removed"
+assert_exists "$STUB_BOX/disk.img" "the sandbox survives a refused -r"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+run_script --mount-rw "$CASE_DIR/other"
+run_script -r
+assert_grep "^REMOVE: remove --force$" "$LOG" "-r without mounts removes the sandbox"
+assert_absent "$(CONFIG)" "-r without mounts also drops a block-only file, so the wizard runs again"
+assert_grep "^LAUNCH:" "$LOG" "-r without mounts launches"
 
 printf '\n%s\n' "----------------------------------------"
 printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
