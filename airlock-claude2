@@ -82,6 +82,23 @@ require_airlock() {
   fi
 }
 
+remove_sandbox_on_rebuild() {
+  local rebuild=$1
+  [[ -n $rebuild ]] || return 0
+  airlock remove --force >&2 || return 1
+}
+
+sandbox_dir() {
+  airlock info --json 2>/dev/null | sed -n 's/^ *"dir": *"\(.*\)",\{0,1\}$/\1/p'
+}
+
+keep_previous_pty_dump() {
+  local dump=$1
+  if [[ -s $dump ]]; then
+    mv -f "$dump" "$dump.previous"
+  fi
+}
+
 session_script() {
   local use_tmux=$1
   if [[ -n $use_tmux ]]; then
@@ -194,12 +211,41 @@ HANDOFF
   fi
 }
 
+strip_terminal_escapes() {
+  local esc=$'\033' bel=$'\007'
+  LC_ALL=C tr -d '\000' \
+    | LC_ALL=C tr '\r' '\n' \
+    | LC_ALL=C sed -E \
+        -e "s/${esc}\][^${bel}${esc}]*(${bel}|${esc}\\\\)?//g" \
+        -e "s/${esc}[PX^_][^${esc}]*(${esc}\\\\)?//g" \
+        -e "s/${esc}\[[^@-~]*[@-~]//g" \
+        -e "s/${esc}[()][0-9A-Za-z]//g" \
+        -e "s/${esc}.//g" \
+    | LC_ALL=C tr -d '\001-\010\013\014\016-\037\177'
+}
+
+print_pty_dump_tail() {
+  local dump=$1 max_lines=$2
+  [[ -s $dump ]] || return 0
+  local last_lines
+  last_lines=$(tail -c 65536 "$dump" | strip_terminal_escapes \
+    | LC_ALL=C sed -e 's/[[:space:]]*$//' -e '/^$/d' | tail -n "$max_lines")
+  [[ -n $last_lines ]] || return 0
+  printf 'airlock-claude2: last session output (whole log: %s):\n' "$dump"
+  printf '%s\n' "$last_lines" | sed 's/^/  /'
+}
+
 parse_args "$@" || exit $?
 [[ -n $SHOW_USAGE ]] && { usage; exit 0; }
 
 validate_exec_usage "$EXEC" "${#CLAUDE_ARGS[@]}" || exit $?
 
 require_airlock || exit 1
+
+remove_sandbox_on_rebuild "$REBUILD" || exit 1
+
+SANDBOX_DIR=$(sandbox_dir)
+[[ -n $SANDBOX_DIR ]] && keep_previous_pty_dump "$SANDBOX_DIR/pty.dump"
 
 SESSION_SCRIPT=$(session_script "$USE_TMUX")
 if [[ -n $EXEC ]]; then
@@ -210,4 +256,7 @@ fi
 
 AIRLOCK_PTY_DUMP=1 airlock start ${MONITOR:+--monitor} --network deny-by-default -- bash -c "$SESSION_SCRIPT" airlock-claude2 "${SESSION_COMMAND[@]}"
 AIRLOCK_EXIT=$?
+
+SANDBOX_DIR=$(sandbox_dir)
+[[ -n $SANDBOX_DIR ]] && print_pty_dump_tail "$SANDBOX_DIR/pty.dump" 15 >&2
 exit "$AIRLOCK_EXIT"

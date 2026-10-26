@@ -330,6 +330,85 @@ run_script -x -- bash
 assert_grep "/etc/claude-code/managed-settings.json" "$(SESSION_SCRIPT)" "-x sessions get the same prelude"
 assert_grep "apk add --quiet tmux" "$(SESSION_SCRIPT)" "-x under tmux installs tmux too"
 
+section "rebuild"
+new_case; stub_all
+run_script
+assert_not_grep "^REMOVE:" "$LOG" "a plain run keeps the sandbox"
+
+new_case; stub_all
+mkdir -p "$STUB_BOX"; : > "$STUB_BOX/disk.img"
+run_script -r
+assert_rc 0 "$RC" "-r exits 0"
+assert_grep "^REMOVE: remove --force$" "$LOG" "-r removes the sandbox through airlock, without a prompt"
+assert_absent "$STUB_BOX/disk.img" "the sandbox disk is gone"
+assert_eq "REMOVE" "$(grep -o '^REMOVE\|^LAUNCH' "$LOG" | head -1)" "the removal happens before the launch"
+assert_grep "^LAUNCH: start" "$LOG" "-r still launches, which brings the wizard back"
+
+new_case; stub_all
+run_script --rebuild
+assert_grep "^REMOVE: remove --force$" "$LOG" "--rebuild is the long form"
+
+new_case; stub_all
+export STUB_REMOVE_EXIT=1
+run_script -r
+assert_rc 1 "$RC" "a failed removal exits 1"
+assert_not_grep "^LAUNCH:" "$LOG" "a failed removal does not launch on the old sandbox"
+
+section "session log"
+new_case; stub_all
+run_script
+assert_grep "LAUNCH_PTY_DUMP: 1" "$LOG" "launch asks airlock to dump the session pty"
+assert_not_grep "last session output" "$CASE_DIR/err" "no dump means no tail"
+
+new_case; stub_all
+export STUB_PTY_DUMP='plain first line\r\n\0033]0;title\0007\0033[1mbold\0033[0m styled line\r\n'
+run_script
+assert_grep "last session output" "$CASE_DIR/err" "a dump is followed by its tail"
+assert_grep "$STUB_BOX/pty.dump" "$CASE_DIR/err" "the tail names the whole log, in the sandbox directory"
+assert_grep "plain first line" "$CASE_DIR/err" "dump text reaches the tail"
+assert_grep "bold styled line" "$CASE_DIR/err" "escape sequences are stripped from around the text"
+assert_not_grep "$(printf '\033')" "$CASE_DIR/err" "no raw escape bytes reach the terminal"
+assert_not_grep "last session output" "$CASE_DIR/out" "the tail goes to stderr, keeping stdout clean for -p"
+
+new_case; stub_all
+NUMBERED=''
+i=1
+while [ "$i" -le 20 ]; do NUMBERED="${NUMBERED}numbered line $i\r\n"; i=$((i + 1)); done
+export STUB_PTY_DUMP=$NUMBERED
+run_script
+assert_grep "numbered line 20" "$CASE_DIR/err" "the tail ends at the last line of the dump"
+assert_grep "numbered line 6" "$CASE_DIR/err" "the tail reaches 15 lines back"
+assert_not_grep "numbered line 5\$" "$CASE_DIR/err" "the tail stops at 15 lines"
+
+new_case; stub_all
+export STUB_PTY_DUMP='overwritten frame\rfinal frame\r\n'
+run_script
+assert_grep "final frame" "$CASE_DIR/err" "the last carriage-return overwrite survives"
+assert_not_grep "framefinal frame" "$CASE_DIR/err" "overwritten frames are not glued together"
+
+new_case; stub_all
+export STUB_EXIT=7 STUB_PTY_DUMP='session died\r\n'
+run_script
+assert_rc 7 "$RC" "airlock's exit status is preserved past the tail"
+assert_grep "session died" "$CASE_DIR/err" "the tail still prints when airlock fails"
+
+new_case; stub_all
+mkdir -p "$STUB_BOX"
+printf 'earlier session\n' > "$STUB_BOX/pty.dump"
+export STUB_PTY_DUMP='current session\r\n'
+run_script
+assert_grep "earlier session" "$STUB_BOX/pty.dump.previous" "the previous run's log is kept"
+assert_grep "current session" "$STUB_BOX/pty.dump" "the new run's log replaces it"
+assert_grep "current session" "$CASE_DIR/err" "the tail shows the new run"
+assert_not_grep "earlier session" "$CASE_DIR/err" "the rotated log stays out of the tail"
+
+new_case; stub_all
+export STUB_NO_SANDBOX=1 STUB_PTY_DUMP='orphan output\r\n'
+run_script
+assert_rc 0 "$RC" "an unresolvable sandbox directory does not fail the run"
+assert_not_grep "last session output" "$CASE_DIR/err" "no sandbox directory means no tail"
+assert_not_grep "No sandbox for" "$CASE_DIR/err" "airlock info's complaint stays silent"
+
 printf '\n%s\n' "----------------------------------------"
 printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ] || exit 1
