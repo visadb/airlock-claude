@@ -186,7 +186,7 @@ temp work dir per case (never this repo), `PATH` rebuilt per case,
 stubs driven by exported env vars reset in `new_case`, labels as
 claims.
 
-Stubs: `airlock` and `bash` only.
+Stubs: `airlock` only. `bash` is a real tool, linked into `TOOLS`.
 - `airlock`: `info --json` prints a fake sandbox JSON with `"dir":
   "$STUB_BOX"`, or exits 1 with the "No sandbox for" line under
   `STUB_NO_SANDBOX`; `remove` logs `REMOVE: ...`, removes `$STUB_BOX`,
