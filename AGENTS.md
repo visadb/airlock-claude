@@ -2,527 +2,277 @@
 
 Guidance for coding agents working in this repository.
 
-## What this repo is
+## What it is
 
-A single-file launcher script, `airlock-claude`, whose purpose is to run
-Claude Code sandboxed inside an `airlock` VM in *any* directory with zero
-manual setup — no per-project image, no hand-written `airlock` config. Run
-from a directory, the script builds what it needs, generates config on the
-fly, and launches Claude Code with network access denied by default. The
-shipped artifact is that one bash script — there is no build system and no
-package manifest. `test-airlock-claude` sits alongside it as a test suite but
-is not part of what you drop on `PATH`.
+A single-file launcher, `airlock-claude`, that runs Claude Code sandboxed
+in an `airlock` VM in any directory, built on airlock's packs and
+templates. It builds nothing and writes no config but the mounts block:
+airlock's setup wizard picks the packs (or a template) on a project's
+first start, the script imposes the deny-by-default policy on the launch
+line, and a short bash prelude prepares the sandbox before every session.
+The shipped artifact is that one script. `test-airlock-claude` is its
+suite.
 
 ## Where the reasoning lives
 
-The scripts carry no explanatory comments, deliberately. `README.md` holds
-everything a user of the script needs to know; this file holds everything
-else — why each step is shaped the way it is, and which properties an edit
-must not break. Anything the code cannot say for itself is written down in one
-of those two files and nowhere else.
-
-Keep it that way. When a change needs an explanation, put the explanation
-here (or in `README.md` if a user would want it) rather than in a comment,
-describe only how things are now — how something used to work, or what a
-step replaced, belongs in the commit message, not here — and
-prefer encoding it in a name where a name can carry it — `USE_TMUX`,
-`config_in_precedence_order` and `/tmp/.airlock-claude-updated-this-boot` all
-exist in that shape on purpose. Don't copy reasoning from here back into the
-code; two copies drift.
+The scripts carry no explanatory comments, deliberately. `README.md`
+holds what a user needs; this file holds everything else. Describe only
+how things are now; history belongs in commit messages. Prefer encoding
+reasoning in a name where a name can carry it.
 
 ## Structure and conventions to preserve
 
-The script is a sequence of one-function-per-step, defined in the order they
-run and called in that order at the bottom, so the call sequence at the end
-reads as a summary of the whole thing — and, because every step takes its
-inputs as arguments and hands back its result on stdout, as a data-flow
-diagram too:
+One function per step, defined in the order they run and called in that
+order at the bottom, so the call sequence reads as a summary and a
+data-flow diagram:
 
 ```
-parse_args "$@"                             sets REBUILD, MONITOR, USE_TMUX, THEME, SHOW_USAGE, CLAUDE_ARGS
-require_airlock                                 before the build, so -r can't spend minutes then fail at the last line
-resolve_theme <flag_theme> <env_theme> <colorfgbg>  -> theme for claude's --settings, or nothing
-pick_container_engine                       -> docker | podman
-build_image_if_needed <engine> <rebuild>        $IMAGE from an inline Dockerfile
-remove_sandbox_on_rebuild <rebuild>         `airlock remove --force`, so the new image gets a new sandbox
-git_identity_env <author_name> <author_email> <committer_name> <committer_email>  -> [env] lines for the host's git identity, or nothing
-generate_airlock_config <engine> <skip_update> <git_identity> <extra_mounts>  writes airlock.local.toml
-sandbox_dir                                 -> the sandbox directory `airlock info` reports, or nothing
-keep_previous_pty_dump <dump>               sets last run's log aside as <dump>.previous
+parse_args "$@"                      sets MONITOR, USE_TMUX, EXEC, REBUILD, SHOW_USAGE, CLAUDE_ARGS, MOUNTS_RW, MOUNTS_RO
+validate_exec_usage <exec> <count>   -x needs a command after --
+require_airlock
+resolve_extra_mounts                 sets MOUNT_SOURCES, MOUNT_TARGETS, MOUNT_READ_ONLY (the array exemption)
+without_mounts_block <file>          -> the file minus the block (1: unreadable, 2: no END line)
+project_config_present               -> 1 if the project has config the wizard would respect, or nothing
+sandbox_dir                          -> the sandbox directory `airlock info` reports, or nothing
+refuse_mounts_on_first_run <count> <rebuild> <sandbox_dir> <has_config>
+remove_sandbox_on_rebuild <rebuild>  `airlock remove --force`
+extra_mounts_block                   -> the marked [mounts] block, or nothing (reads the arrays)
+write_mounts_block <block>           rewrites the block in airlock.local.toml, or removes the file
+sandbox_dir                          again, for the rotation
+keep_previous_pty_dump <dump>        sets last run's log aside as <dump>.previous
+session_script <use_tmux>            -> the bash script that runs in the sandbox
     (the airlock start line — the handoff)
-sandbox_dir                                 again: a first run has no sandbox until airlock made one
-print_pty_dump_tail <dump> <max_lines>      -> the session's last lines, escape-stripped
+sandbox_dir                          again: a first run has no sandbox until airlock made one
+print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-stripped
 ```
 
-- Keep new steps as functions in that same defined-in-call-order shape.
-- **Whatever varies is a positional argument, named into a `local` on the
-  first line of the function; outputs are printed.** No step function reads or
-  writes script *state*, so its whole contract is visible at the call site.
-  When a step needs a value from the environment
-  (`AIRLOCK_CLAUDE_SKIP_UPDATE`), the main sequence reads it and passes it in.
-- **`parse_args` is the one deliberate exemption from that rule: it sets its
-  option globals directly instead of printing them.** Its output includes an
-  arbitrary-argument array — `CLAUDE_ARGS`, the arguments after `--`,
-  forwarded verbatim to `claude` — and arbitrary user strings can't ride
-  safely through a delimiter-joined stdout channel, while a bash array can't
-  be returned through stdout at all. Setting globals from a function that runs
-  in the main shell is the standard bash idiom for this. It initializes every
-  global it owns on its first line, so the defaults live in the function.
-- **Global constants are the exception: `IMAGE` is used where it's needed
-  rather than threaded through arguments.** It never varies, so passing it
-  would document nothing and only make the call sites longer.
+- Keep new steps as functions in that same shape. **Whatever varies is a
+  positional argument, named into a `local` on the first line; outputs
+  are printed.** No step reads or writes script state.
+- **`parse_args` is the one exemption: it sets its option globals
+  directly.** Its output includes `CLAUDE_ARGS`, an arbitrary-argument
+  array, which can't ride through stdout. It initializes every global it
+  owns on its first line, so the defaults live in the function.
+  `resolve_extra_mounts` and `extra_mounts_block` share the exemption for
+  the same reason: the resolved mounts are three parallel arrays, set by
+  the one and read by the other.
 - **Failure is a nonzero `return` with a message on stderr; only the main
-  sequence calls `exit`.** That isn't just tidiness: a function that runs
-  inside `$( )` runs in a subshell, where `exit` ends only the subshell and
-  the script carries on regardless. Every step is written to be safe to
-  capture.
-- The main sequence owns all remaining script state — `CONTAINER_ENGINE`,
-  `THEME`, `SANDBOX_DIR`, `AIRLOCK_EXIT` — assigned from the
-  values the steps return; the
-  option globals (`REBUILD`, `MONITOR`, `USE_TMUX`, `THEME`,
-  `SHOW_USAGE`) are assigned by `parse_args` itself, per the exemption above.
-  `THEME` appears in both lists: `parse_args` seeds it
-  with the `--theme` value and the main sequence reassigns it from
-  `resolve_theme`, which folds in the env variable and the detection.
-- `-h`/`--help` sets `SHOW_USAGE` and `break`s out; the main sequence is what
-  calls `usage`, keeping `parse_args` pure parsing. `break` rather than
-  continuing to parse is what keeps `--help --bogus` exiting 0.
-- The `airlock start` line is deliberately *not* in a function — it's the
-  handoff, and keeping it at top level means "what does this script ultimately
-  run?" is answered by reading it. It isn't the literal last line: its
-  exit status is captured into `AIRLOCK_EXIT`, the session tail is printed,
-  and the explicit `exit "$AIRLOCK_EXIT"` hands airlock's status through as
-  the script's own — anything added after the launch must not become the
-  exit status the caller sees.
-- The `${MONITOR:+--monitor}`, `${USE_TMUX:+tmux -u new-session -A -s claude}`,
-  and `${THEME:+...}` expansions on that line are
-  **unquoted on purpose**: an empty one has to disappear entirely rather than
-  become an empty argument. Quoting them "to satisfy shellcheck" breaks `-M`,
-  `-T` and the theme, and the suite's exact-argv assertions catch it.
-  Inside `${THEME:+...}` the escaped quotes around the settings JSON are the
-  opposite and load-bearing the other way: they keep `{"theme":"dark"}` one
-  word through the unquoted expansion, and the suite's `ARGV` dump asserts
-  that too. The theme sits before `"${CLAUDE_ARGS[@]}"` so a user-forwarded
-  `--settings` can override it wherever `claude` resolves a repeat last-wins. `"${CLAUDE_ARGS[@]}"`
-  at the end is the opposite, quoted on purpose: a quoted `[@]` expansion
-  keeps each forwarded argument exactly one word — a multi-word `-p` prompt
-  included — and an empty array still vanishes rather than becoming an empty
-  argument, because `"${arr[@]}"` of an empty array expands to zero words.
-  It sits last so the user's arguments can override what the wrapper adds
-  wherever `claude` resolves a repeated flag last-wins.
-- The tmux flag is `USE_TMUX`, not `TMUX`: tmux sets `TMUX` itself to mark a
-  shell as being inside a session, so a variable of ours by that name would be
-  read as that one.
-- The Dockerfile is an inline heredoc inside `build_image_if_needed`. It
-  bakes in nothing host-specific, so one image serves every project and
-  user on the machine; anything that varies per host or per run (the git
-  identity, the token, the mounts) travels in the generated config instead.
+  sequence calls `exit`.** A function run inside `$( )` is a subshell,
+  where `exit` would end only the subshell.
+- `-h`/`--help` sets `SHOW_USAGE` and `break`s out; the main sequence
+  calls `usage`. `break` rather than parsing on keeps `--help --bogus`
+  exiting 0.
+- The `airlock start` line is deliberately *not* in a function. Its exit
+  status is captured into `AIRLOCK_EXIT`, the tail is printed, and the
+  explicit `exit "$AIRLOCK_EXIT"` hands airlock's status through.
+- `${MONITOR:+--monitor}` on that line is **unquoted on purpose**: an
+  empty value has to disappear. `"${SESSION_COMMAND[@]}"` is quoted on
+  purpose: each forwarded word stays one word.
+- The tmux flag is `USE_TMUX`, not `TMUX`: tmux sets `TMUX` itself.
+- There are no positive `-m`/`-t` flags; the defaults are on and the
+  negatives turn them off.
 
 ## Why each step is the way it is
 
-- **`require_airlock` runs after `parse_args` and before the build.** After
-  `parse_args`, so `--help` still works on a machine without `airlock`
-  installed; before the build, because under `-r` the build spends minutes on
-  `--no-cache --pull` first, and failing after that would hand the user
-  `airlock: command not found` in exchange for the wait.
-- **`resolve_theme` settles dark-versus-light on the host because Claude
-  Code's own detection can't.** Claude Code asks its terminal for the
-  background colour with an OSC 11 query, but from inside the VM that query
-  stops at tmux, which doesn't forward it to the host terminal, so the
-  sandboxed session guesses. The host side can ask, with the same query, so
-  the script does — before handing the terminal to `airlock`. The probe
-  order encodes trust: an actual terminal answer outranks the macOS
-  appearance (dark terminals on light desktops are common), which outranks
-  the `COLORFGBG` heuristic (set once at terminal startup and often stale).
-  An empty result means no `--settings` flag at all, so claude's own
-  persisted theme stands rather than being stomped by a default.
-- **The theme rides on `--settings '{"theme":…}'` rather than in any file.**
-  `managed-settings.json` is baked at image build, which would freeze the
-  theme until a `-r`; the VM's `~/.claude` is the user's own persisted state
-  (mounted from `~/.airlock/claude`), and writing there would permanently
-  clobber a choice they made in-session. The per-invocation flag scopes the
-  override to the launch, which is exactly the scope the theme has on the
-  host. It runs early, next to `require_airlock`, so a typo'd `--theme`
-  fails before a build can spend minutes.
-- **`theme_from_terminal_background` gates on `-t 0 && -t 2`, not `-t 1`.**
-  `resolve_theme` runs inside `$( )`, where stdout is the capture pipe, so
-  `-t 1` would be false precisely when the script is used normally; stderr
-  is the stream still pointing at the terminal. The gate is also what keeps
-  the suite — which redirects both — from sending real escape queries at
-  whatever terminal runs the tests.
-- **The OSC reply `read` uses an integer `-t 1` on purpose**: macOS
-  `/bin/bash` is 3.2, where a fractional timeout is an error, and the
-  `#!/bin/bash` shebang resolves to it there. The full second is only ever
-  waited out by a terminal that answers BEL-terminated or not at all —
-  `read -d '\'` returns the moment an ST terminator's backslash arrives, and
-  on timeout it still hands over what it consumed, which is why a
-  BEL-terminated reply parses anyway (`channel_as_8_bit` strips the trailing
-  terminator as non-hex).
-- **`generate_airlock_config` writes the picked engine into
-  `[vm.image] resolution`** because `airlock` shells out to the engine the
-  config names to find a locally built image, and `docker` and `podman` are
-  both first-class values there. The default `auto` would work too but tries
-  `docker` first, which on a podman-only host (the usual macOS case) is a
-  wasted spawn and a misleading error when the image is missing.
-- **`remove_sandbox_on_rebuild` goes through `airlock remove --force` because
-  the sandbox lives in airlock's data directory, not in the project.** The
-  disk, the image hardlink, the CA, the install records and the local config
-  are under `<data dir>/boxes/<id>` — `~/Library/Application Support/airlock`
-  on macOS, `~/.local/share/airlock` on Linux — where nothing the script could
-  delete by path belongs to it. Without the removal, a rebuilt image reaches
-  an existing sandbox as airlock's "Sandbox image has been changed" question,
-  whose "Continue with current sandbox" answer keeps the *old image* in use
-  (`ImageChange::KeepOld`), so a `-r` can finish with the previous image's
-  files still on disk. `remove` is airlock's supported way to start again;
-  its `gc_sweep` also drops the old image from the cache. It runs *before*
-  `generate_airlock_config` because removal deletes `airlock.local.toml`
-  along with the sandbox, and a failure aborts the run for the same reason a
-  failed config write does: launching on the old sandbox would silently not
-  be a rebuild. The `rm -rf .airlock` that follows is for a sandbox an older
-  airlock keeps inside the project: airlock offers to import one at start,
-  and under `-r` that import would only be discarded.
-- **`sandbox_dir` parses `airlock info --json` with `sed`, not `jq`**, because
-  the host isn't guaranteed to have `jq` (macOS doesn't ship it) and the
-  pretty-printed JSON puts `"dir"` on a line of its own. It is called twice:
-  before the launch for the rotation, where a project with no sandbox yet
-  yields nothing and the rotation is skipped, and after, when a first run has
-  a sandbox at last. Its stderr is silenced — "No sandbox for … — run
-  `airlock start` first" is the expected answer on a first run, not news.
-- **`generate_airlock_config` builds `skip_update_line` above the heredoc and
-  expands it inside `[env]`** rather than appending the key after the fact. An
-  appended key joins whichever table ends up last, so adding a table below
-  `[env]` would silently move it out and stop the opt-out reaching the VM.
-  With `--mount-rw`/`--mount-ro` there *are* tables below `[env]` — the
-  mounts — which is exactly why the opt-out, the token override and the git
-  identity lines have to stay lexically inside `[env]`, above them; the suite
-  asserts that placement.
-- **The generated config turns on airlock's `anthropic` sign-in service and
-  makes the preset's token entry optional; that pair is what lets a session
-  log in from inside the sandbox.** The `claude-code` preset declares
-  `CLAUDE_CODE_OAUTH_TOKEN` as a masked `[env]` entry whose `${...}` template
-  must resolve from the host env or the vault, so on a machine without a
-  token `airlock start` would stop with a config error before anything ran.
-  Config layers merge as JSON before a single parse, so
-  `CLAUDE_CODE_OAUTH_TOKEN = { optional = true }` in the local config folds
-  into the preset's entry instead of replacing it: with a host token the
-  entry is still masked and injected into `api.anthropic.com` requests at the
-  host boundary, and without one it is left out and `claude` starts with no
-  credential. `[network.services] anthropic = true` is what then makes
-  `/login` work: airlock owns `platform.claude.com` and `api.anthropic.com`,
-  opens the sign-in page in the host browser, keeps the real tokens encrypted
-  on the host and hands the sandbox surrogates — the same arrangement
-  airlock's own `claude` pack uses. The service needs a usable secret vault
-  (the default keyring is fine): with the vault disabled or unreadable,
-  airlock blocks the service's hosts under every policy and prints a warning
-  naming the opt-out, and `api.anthropic.com` goes with them. A sign-in is
-  shared by every airlock sandbox that enables the service, and a logout in
-  one signs out all. Nothing on the launch line concerns credentials.
-- **`git_identity_env` resolves the host's git identity on every run and
-  hands it to the VM as `GIT_AUTHOR_*`/`GIT_COMMITTER_*` in `[env]`** rather
-  than baking `user.name`/`user.email` into the image. It runs in the project
-  directory, so `git config --get` sees repo-local config, includes and
-  conditional includes exactly as git on the host would, and a host
-  `GIT_AUTHOR_NAME` (and the other three) outranks it, as it would for git
-  itself. The values cross two syntaxes on the way: `[env]` values are
-  airlock `${VAR}` templates, so `template_escaped` backslash-escapes `$` and
-  `\` first (the rule airlock's `git` pack applies), and `toml_escaped` then
-  escapes the result for the TOML string. `airlock` forwards only the env
-  vars the config names, which is why the identity has to be in `[env]` at
-  all. An empty identity produces no lines, and git in the VM falls back to
-  its own guesses.
-- **A failed config write aborts the run instead of falling through to the
-  launch.** Otherwise `airlock` would start on whatever `airlock.local.toml` a
-  previous run left in the directory, or on its own defaults, and the
-  deny-by-default policy this script exists to impose would silently not be the
-  one in effect.
-- **`AIRLOCK_PTY_DUMP=1` is an env prefix on the launch line, not an `[env]`
-  entry.** It is read by the airlock CLI itself on the host
-  (`DumpSink::from_env` in `app/airlock-cli/src/runtime/dump.rs`), which then
-  writes every byte of the guest session's pty — stdout and stderr events
-  both — to `pty.dump` in the sandbox directory. Putting it in `[env]` would only
-  forward it into the VM, where nothing reads it. An airlock predating the
-  variable ignores it, so the wrapper degrades to recording nothing and
-  printing nothing.
-- **`keep_previous_pty_dump` runs immediately before the launch** because
-  airlock opens the dump with `truncate(true)` at every start — without the
-  rotation, relaunching destroys exactly the log a bad exit made you want.
-  One `.previous` generation is kept; the move is best-effort, and a failure
-  only means airlock truncates in place as before.
-- **`print_pty_dump_tail` runs after `airlock start` returns, and the call
-  site sends it to stderr.** After, because the monitor TUI and tmux restore
-  the host screen on exit, taking the session's final output with them — this
-  is the whole feature. Stderr for the same reason the image wrapper's update
-  output uses it: `claude -p` stdout must stay clean for scripting. A missing
-  or empty dump prints nothing at all: airlock only opens the dump after the
-  VM boots, so anything that failed earlier already printed its error to the
-  terminal normally, and a header with no content under it would be noise.
-- **`strip_terminal_escapes` is best-effort text recovery, not a terminal
-  emulator.** The dump is the raw pty stream, tmux redraws included. CR is
-  turned into LF first so overprinted lines (spinners, progress) land as
-  separate lines with the final state last; then OSC (BEL- or ST-terminated),
-  DCS/SOS/PM/APC, CSI, charset-select and remaining two-byte ESC sequences
-  are stripped, in that order — the two-byte catchall must come last or it
-  would eat the introducer of a longer sequence and leave its payload behind.
-  A final `tr` deletes what's left of the control set except LF and TAB;
-  `LC_ALL=C` throughout keeps sed and tr byte-oriented so UTF-8 (Claude
-  Code's borders) passes through untouched and NULs can't truncate BSD sed
-  lines (they are deleted first). `tail -c 65536` in the caller bounds the
-  work — after a long session the dump can be very large, and only the last
-  lines are wanted. Reconstructing the true final screen would need vt100
-  emulation, which is exactly the moving part this stays away from.
-- **The script runs `airlock` with the user's own `HOME`, untouched.**
-  airlock resolves `~` from `HOME` (`dirs::home_dir`): its data directory,
-  `~/.airlock` settings, the secret vault and the persisted Claude settings
-  mount all hang off it, so any `HOME` the script set for the launch would
-  make `airlock start` and the user's own `airlock info`/`remove` disagree
-  about which sandbox is theirs.
-
-## The Dockerfile
-
-`README.md` summarises the user-visible surface (mouse and clipboard in
-tmux, UTF-8, the permission bypass); the reasoning behind it lives here:
-
-- **`/etc/tmux.conf` sets `mouse on`, `set-clipboard on` plus a
-  `terminal-features` entry asserting OSC 52 support for every terminal, and
-  `default-terminal "tmux-256color"`.** It's the system-level config, so it
-  applies whichever user the VM runs as. `mouse on` doesn't cost panes their
-  mouse — tmux
-  forwards events to any pane whose program asked for mouse reporting, so
-  Claude Code and `nvim` keep theirs. The `terminal-features` assertion is
-  needed because tmux only emits OSC 52 (which is what carries a copy to the
-  host clipboard from inside the VM) for terminals it believes support it,
-  and the host terminal on the far side of the VM isn't something it can
-  recognise. `default-terminal` keeps the session from dropping to 8
-  colours.
-- **`DEBIAN_FRONTEND` is scoped to the `RUN` command** rather than set as an
-  `ENV`, so it doesn't follow the image into the session. `locales` is the one
-  package here with anything to ask.
-- **`/etc/locale.gen` is overwritten, not appended to**, so exactly one locale
-  is built.
-- **`LANG=en_US.UTF-8` and tmux's `-u` flag are deliberately redundant; don't
-  drop either on the grounds that the other covers it.** tmux decides whether
-  its terminal is UTF-8 by reading `LC_ALL`/`LC_CTYPE`/`LANG`, and a tmux that
-  concludes "not UTF-8" rewrites box-drawing characters into VT100 ACS escapes
-  and mangles anything multi-byte — Claude Code's borders arrive as `q` and
-  `x`. `-u` forces tmux's output to UTF-8 regardless of that check and is what
-  was confirmed to fix the rendering; `LANG` fixes the locale itself, which
-  everything else in the VM reads too (the base image sets no `LANG` at all,
-  leaving the VM in the POSIX locale).
-- **A named locale rather than `C.UTF-8` has a collation cost.** `LANG` sets
-  `LC_COLLATE` too, so `sort`, `ls` and glob ranges use English collation —
-  which ignores punctuation and case — instead of byte order; exporting
-  `LC_COLLATE=C` in the session restores C sorting.
-- **`ncurses-base` is reinstalled immediately after `ncurses-term`.**
-  `ncurses-term` is there for the Alacritty terminfo entries (`alacritty`,
-  `alacritty+common`, `alacritty-direct`), but installing it on this image
-  makes the entries `ncurses-base` owns disappear from the filesystem,
-  `xterm-256color` and `tmux-256color` included, and `tmux` then refuses to
-  start. The packages don't overlap, so a plain install shouldn't be able
-  to do that; the working theory is that it's an artefact of the virtiofs +
-  overlayfs stack airlock builds images on, not of `apt` itself. It isn't
-  understood, only observed. Reinstalling `ncurses-base` afterward restores
-  its entries, so that's the fix. The order matters: the reinstall has to
-  come *after* `ncurses-term`, in the same `RUN` so the apt lists are still
-  present, and before they're deleted. `--reinstall` is what makes apt
-  touch a package that's already at the wanted version.
-- **Node.js comes from `nvm` at `NVM_DIR=/opt/nvm`, and `PATH` points at a
-  `current` symlink rather than at a versioned directory.** The LTS version
-  `nvm install --lts` picks isn't known when the `ENV PATH` line is written,
-  so the build resolves the `default` alias afterward and links `current` to
-  it; that one static `PATH` entry is what makes `node`, `npm` and `npx`
-  resolve in every shell — Claude Code's non-interactive `Bash` tool
-  included — without anything having to source `nvm.sh`. **`/etc/profile.d/nvm.sh`
-  appends the same entry again, and that duplication is load-bearing:**
-  Debian's `/etc/profile` resets `PATH` to a fixed list before it reads
-  `profile.d`, so every login shell — each new tmux window or pane — loses
-  the image's `ENV PATH` additions (`/opt/claude/.local/bin` goes the same
-  way). The `claude` process itself is unaffected: airlock only wraps the
-  command in a login shell under its own `--login` flag, which this script
-  doesn't pass, so `claude` and its `Bash` tool see the `ENV` as written.
-  The same `profile.d` file sources `nvm.sh` so login shells get the `nvm`
-  *command*, which is a shell function; that part gates on `BASH_VERSION`
-  because `/etc/profile.d` is read by `dash` too and `nvm.sh` isn't POSIX
-  `sh` (the `PATH` part above it is, on purpose), and sources with
-  `--no-use` so a login shell doesn't pay for an `nvm use default` it
-  doesn't need. The managed `CLAUDE.md` says how to reach `nvm` from a
-  non-login shell, since the `Bash` tool is one. The same `--no-use` on the build line is what
-  lets `nvm.sh` be sourced before any version exists. The `mkdir -p` ahead of the installer is required, not tidiness: the
-  installer aborts when `NVM_DIR` is set but the directory is missing,
-  rather than creating it. `PROFILE=/dev/null`
-  stops the installer appending to a `.bashrc` under the build's `HOME`,
-  which no VM user would ever read. Like `/opt/claude`, the tree is outside
-  any home directory and left `a+rwX`, so a non-root VM user can
-  `nvm install` another version or `npm install -g`. The installer URL pins
-  an nvm release on purpose; bump it by hand.
-- **`CLAUDE_INSTALL_HOME=/opt/claude` is a fixed path outside any home
-  directory**, so the launcher path doesn't depend on which user the VM ends up
-  running as, and the tree is left world-writable (`chmod -R a+rwX`) so a
-  non-root VM user can still update it. The VM user isn't guaranteed to be
-  root.
-- **`/opt/claude/.local/bin` is *appended* to `PATH`, not prepended.**
-  `/usr/local/bin` has to stay ahead so `claude` resolves to the wrapper, but
-  having the install directory on `PATH` at all stops Claude Code warning about
-  it on every update.
-- **The wrapper overrides `HOME` for the update only**, so the updater resolves
-  the image's install rather than the VM user's home. The session itself keeps
-  the real `HOME`, which is where its config and credentials live.
-- **The update runs once per VM boot**, gated on a stamp file in `/tmp`:
-  nested `claude` calls must not swap the binary out from under a running
-  session.
+- **The script writes no config except the mounts block, and that is
+  what makes templates work.**
+  A template can only be chosen in airlock's interactive setup wizard
+  (`airlock start` has no `--template` flag), and the wizard runs only
+  when the project has no config at all — no `airlock.toml`, no
+  `airlock.local.toml`, no local project file in the sandbox directory.
+  A script-written `airlock.local.toml` would suppress the wizard and
+  with it every template. So the wizard's answers (packs, template,
+  clipboard) are the sandbox's config, saved by airlock in the sandbox
+  directory, and the project's own `airlock.toml` applies as usual.
+- **The policy is `--network deny-by-default` on the launch line.** The
+  flag overrides the configured policy for one run and writes nothing
+  back; rules from the config still apply. It is the one thing the script
+  must impose, and a flag is the only way to impose it without a file.
+- **`require_airlock` runs after `parse_args`** so `--help` works on a
+  machine without `airlock`.
+- **`remove_sandbox_on_rebuild` goes through `airlock remove --force`.**
+  The sandbox lives in airlock's data directory, where nothing the script
+  could delete by path belongs to it. Removal also deletes the wizard's
+  local config, so the next start runs the wizard again. A failure aborts
+  the run: launching on the old sandbox would silently not be a rebuild.
+  There is no `rm -rf .airlock`: a current airlock keeps nothing in the
+  project.
+- **The mounts are one marked block of `airlock.local.toml`, rewritten on
+  every run.** `airlock start` has no mount flag, so a config file is the
+  only way in, and `airlock.local.toml` is the one airlock reads but a
+  project doesn't commit. The block is bounded by `# BEGIN airlock-claude
+  mounts` and `# END airlock-claude mounts` so the script can replace
+  exactly its own lines and leave a hand-written file's other content
+  alone; the BEGIN line says the block is rewritten, so a user editing the
+  file knows not to edit inside it. A run without mount flags removes the
+  block, and a file left holding only whitespace is removed with it —
+  otherwise a leftover file would suppress the wizard after `-r`. That
+  rule applies after a block was stripped: a whitespace-only file the
+  script did not write is kept, and a run without mount flags leaves a
+  file that holds no block byte-identical, so a hand-written
+  `airlock.local.toml` is never rewritten just because the script ran. A
+  `# BEGIN` line without its `# END` line is refused with a message and
+  exit 1 rather than stripped to the end of the file; the reader
+  (`without_mounts_block`) is pure bash and reports status 1 for
+  unreadable, 2 for unterminated. Under `-r` that refusal happens after
+  `airlock remove`, so a `-r` on such a file removes the sandbox and then
+  stops before the launch. Any other read or write failure also aborts
+  before the launch, since airlock would start on the previous file and
+  silently not have the mounts. `resolve_extra_mount` rejects a mount path
+  containing control characters (exit 2), because a TOML basic string
+  can't carry a raw newline and `toml_escaped` covers only `\` and `"`.
+- **`refuse_mounts_on_first_run` runs before `remove_sandbox_on_rebuild`.**
+  A file in the project keeps the wizard from running, so mounts can't be
+  combined with the start that creates the sandbox: no sandbox yet, or
+  `-r`, and no project config of the user's own (`airlock.*`, a non-TOML
+  `airlock.local.*`, or an `airlock.local.toml` with content outside the
+  block — a leftover block of the script's own doesn't count). Checking
+  before the removal is what keeps `-r --mount-rw x` from destroying the
+  sandbox and then failing.
+- **`sandbox_dir` parses `airlock info --json` with `sed`, not `jq`**,
+  because the host isn't guaranteed to have `jq`, and the pretty-printed
+  JSON puts `"dir"` on a line of its own. It is called twice: before the
+  launch for the rotation (a project with no sandbox yet yields nothing)
+  and after, when a first run has a sandbox at last. Its stderr is
+  silenced — "No sandbox for …" is the expected answer on a first run.
+- **`session_script` builds the prelude on the host and the launch line
+  passes it as the one argument of `bash -c`**, with `airlock-claude` as
+  the script's `$0` and the session command as its `"$@"`. Nothing is
+  written into the project directory.
+- **The prelude runs on every launch and is idempotent.** airlock
+  re-creates the sandbox disk by itself when the image or the packs
+  change, and a sandbox made by a plain `airlock start` has no tmux
+  either; a "did the sandbox exist before" check on the host would miss
+  both and launch a tmux that is not there. Instead: `command -v tmux ||
+  apk add tmux`, and the files under `/etc` are rewritten each time (one
+  heredoc each), so a changed text in a newer script reaches an existing
+  sandbox without a `-r`. The tmux install is skipped under `-T`, and a
+  failed install exits 1 before tmux is launched, so apk's own error is
+  what the user sees rather than "tmux: not found". The `alpine` pack's
+  `allow-apk` (default on) is what lets `apk add` through deny-by-default.
+- **The wrapper is `bash -c`, not `sh -c`, because of `printf '%q '`.**
+  tmux runs its command through a shell only when it receives a single
+  command argument (given several words it calls `execvp` directly), and
+  the handoff passes one string so the path is the same for every command.
+  `printf '%q '` re-quotes each word for that shell, so a multi-word
+  `-p "run the tests"` stays one word. The shell that reads the string is
+  tmux's `default-shell` (busybox `ash` for root on Alpine), so a word
+  containing a newline, which `%q` writes as `$'…'`, depends on that shell
+  understanding `$'…'`; busybox `ash` does. The `claude` pack installs
+  `bash` on Alpine, so the wrapper is always there.
+- **`/etc/claude-code/managed-settings.json` is what puts the session in
+  `bypassPermissions`**, with `skipDangerousModePermissionPrompt` so a new
+  sandbox doesn't ask. Managed settings are the highest-precedence source,
+  apply whichever user runs, and sit outside `~/.claude`, which the
+  `claude` pack mounts from the host and shares between sandboxes —
+  writing there would clobber the user's own settings. The launch line
+  carries no permission flag.
 - **`/etc/claude-code/CLAUDE.md` is Claude Code's managed-policy memory**,
-  the memory-file counterpart of `managed-settings.json`: Claude Code reads
-  it into every session on the machine, whichever user runs it, ahead of
-  `~/.claude/CLAUDE.md` and the project's. It was confirmed to load for
-  `claude -p` too, by writing a probe word there and asking for it. It's the
-  right place for anything Claude Code should know about *the sandbox* rather
-  than about a project, because the alternatives don't work from a launcher:
-  `~/.claude` in the VM is the host's `~/.airlock/claude/settings`, which the
-  user owns and the `claude-code` preset mounts in — writing a `CLAUDE.md`
-  there would clobber theirs — and a project `CLAUDE.md` would mean writing
-  into every directory the script is run from.
-- **The content written with `printf '%s\n' '...'` must contain no
-  apostrophe.** Each line is a single-quoted shell word inside a `RUN`, so an
-  apostrophe ends the quote and the build fails at that layer. The suite
-  greps for the shape and also runs every `RUN` command through `sh -n`, so
-  a bad line fails in a second rather than after a multi-minute build.
+  read into every session ahead of the user's and the project's. It is
+  the right place for what Claude Code should know about *the sandbox*:
+  the 403 the proxy answers denied requests with, that the user can allow
+  traffic temporarily, that packages come from `apk` on musl, the Python
+  `VERIFY_X509_STRICT` workaround (airlock's per-host leaf certificates
+  carry no Authority Key Identifier; `pip` and `curl` are unaffected), to
+  leave host-made virtualenvs alone, and to describe the present only.
+- **The prelude is a quoted heredoc on the host, and the files it writes
+  are quoted heredocs inside it with other delimiters.** Quotes,
+  apostrophes and `$` in the content pass through both layers untouched.
+  The suite extracts the script from the launch argv and runs `bash -n` on
+  it.
+- **`/etc/tmux.conf` sets `mouse on`, `set-clipboard on`, a
+  `terminal-features` entry asserting OSC 52 for every terminal, and
+  `default-terminal "tmux-256color"`.** `mouse on` doesn't cost panes
+  their mouse. The `terminal-features` assertion is needed because tmux
+  only emits OSC 52 for terminals it believes support it, and the host
+  terminal on the far side of the VM isn't one it can recognise. `tmux -u`
+  on the handoff forces UTF-8 output regardless of the locale; Alpine's
+  musl libc is UTF-8 anyway, but the flag is what keeps Claude Code's
+  box-drawing intact if that ever changes.
+- **`AIRLOCK_PTY_DUMP=1` is an env prefix on the launch line.** It is read
+  by the airlock CLI on the host, which writes every byte of the guest
+  pty to `pty.dump` in the sandbox directory, truncating at each start.
+  `keep_previous_pty_dump` runs immediately before the launch for that
+  reason; one `.previous` generation is kept, best-effort.
+- **`print_pty_dump_tail` runs after `airlock start` returns and goes to
+  stderr.** After, because the monitor and tmux restore the host screen on
+  exit; stderr so `claude -p` stdout stays clean. A missing or empty dump
+  prints nothing.
+- **`strip_terminal_escapes` is best-effort text recovery, not a terminal
+  emulator.** CR becomes LF first so overprinted lines land as separate
+  lines with the final state last; then OSC, DCS/SOS/PM/APC, CSI,
+  charset-select and remaining two-byte ESC sequences are stripped, in
+  that order — the two-byte catchall must come last. `LC_ALL=C` keeps sed
+  and tr byte-oriented so UTF-8 passes through. `tail -c 65536` in the
+  caller bounds the work.
+- **The script runs `airlock` with the user's own `HOME`, untouched**, so
+  `airlock start` and the user's own `airlock info`/`remove` agree on
+  which sandbox is theirs.
 
 ## Non-obvious behavior
 
-Things that aren't visible from the script at all:
+- **A changed mount set is a config change.** `airlock start` compares
+  the config with the last run's and asks once; `--yes` or no terminal
+  aborts with exit 2. The script does not pass
+  `--allow-configuration-changes`, because that would also wave through
+  an `airlock.toml` edited by code inside the sandbox.
+- **The mount point stays behind.** airlock creates the target directory
+  under the project and leaves it, empty, after the session; `.gitignore`
+  it along with `airlock.local.toml`.
+- **The wizard needs a terminal.** A project's first run must be
+  interactive; a `-p` run in a project with no sandbox stops with
+  airlock's "no config, no terminal" error.
+- **The `claude` pack owns the install, the updates, the tokens and
+  `~/.claude`.** `claude update` works inside the session; a new sandbox
+  gets the newest version. A sign-in is shared by every sandbox with the
+  pack, and a logout in one signs out all.
+- **`airlock remove` under `-r` discards whatever lived on the sandbox
+  disk**, apk packages included. `~/.claude` is a host mount and survives.
+- **The theme is not resolved.** Claude Code's `auto` resolves dark inside
+  the VM (its OSC 11 query stops at tmux). Pass `-- --settings
+  '{"theme":"light"}'` if that matters.
 
-- **The wrapper's update output goes to stderr on purpose**, so `claude -p`
-  stdout stays clean for scripting. A failed update is non-fatal — the session
-  falls back to the version baked into the image.
-- **`DISABLE_AUTOUPDATER=1` in the generated config only disables the
-  *background* autoupdater.** It does not affect the explicit `claude update`
-  the image's wrapper runs at startup; that update reaches the network because
-  the `claude-code` preset already allows `downloads.claude.ai:443` under the
-  deny-by-default policy.
-- **The permission bypass is in the image, not on the launch line.** The last
-  line runs `claude` with no permission flag; what puts the session in
-  `bypassPermissions` mode is `/etc/claude-code/managed-settings.json`, written
-  by the Dockerfile. Same reasoning as `/etc/gitconfig` and `/etc/tmux.conf` —
-  it applies whichever user the VM runs as, and being outside `HOME` it's
-  clear of what the preset mounts into the VM's home — except
-  that managed settings are the *highest*-precedence source, so a host
-  `~/.claude/settings.json` can't override it.
-- **Python HTTPS fails in the sandbox because of `VERIFY_X509_STRICT`, not a
-  missing CA.** Every Python client (`urllib`, `http.client`, `urllib3`,
-  `requests`, `httpx`, `aiohttp`) rejects the proxy's certificates with
-  `Missing Authority Key Identifier`; Python 3.13+ sets the strict flag in
-  `ssl.create_default_context()`, and the leaf certificates `airlock` mints
-  per host (`get_or_create_config` in `app/airlock-cli/src/network/tls.rs`,
-  built from `rcgen::CertificateParams::new` with nothing but a CN and a SAN)
-  carry no AKI extension. `pip` and `curl` are unaffected. `SSL_CERT_FILE`
-  changes nothing, since `/usr/lib/ssl/cert.pem` already resolves to the
-  merged bundle. The managed `CLAUDE.md` carries the per-client workaround
-  (a context with the flag cleared), each recipe verified against pypi.org
-  from inside the VM. The real fix is upstream in `airlock`: have the leaf
-  certificates carry an Authority Key Identifier — in `rcgen` that's
-  `use_authority_key_identifier_extension = true` on the leaf's params,
-  with the CA carrying a Subject Key Identifier — after which the note can
-  go. A `sitecustomize.py` in the image that clears the flag globally was
-  considered and rejected: it wouldn't reach virtualenvs, which don't see the
-  base `site-packages`, and would only paper over the gap for the base
-  interpreter.
-- **`airlock` forwards only the env vars the config names**, which is why a
-  host `AIRLOCK_CLAUDE_SKIP_UPDATE` has to be written into `[env]` to reach the
-  VM at all. `AIRLOCK_CLAUDE_THEME` deliberately isn't in `[env]`: nothing in
-  the VM reads it — it's consumed on the host by `resolve_theme` and delivered
-  as a `claude` flag instead.
-- **The theme only applies when tmux creates the session.** `new-session -A`
-  attaches to an existing session named `claude` and ignores the rest of its
-  command line, so on the rare path where a previous session is still alive,
-  a changed host theme (like any changed `claude` flag) waits for the next
-  fresh session.
-- **Claude Code's `theme=auto` always resolves dark inside the VM, and no
-  config can change that** — verified against claude 2.1.273 and tmux 3.5a
-  by running each under a scripted pty. Auto detection is one OSC 11
-  background query (`ESC ] 11 ; ? ESC \`, observed ~0.3s after launch)
-  answered with `rgb:RRRR/GGGG/BBBB`; when no answer arrives, dark is the
-  default. Inside the VM no answer can arrive: tmux neither forwards an
-  application's OSC 11 query to its outer terminal nor answers it from what
-  it knows — tested with the outer terminal answering tmux's own background
-  query (tmux does ask at attach, then never shares the answer) and with an
-  explicit `window-style bg=`, both ignored — and on the `-T` path the query
-  stops at airlock's monitor pty instead. Nor is there another way to hand
-  claude the answer: no env variable or settings key carries a background
-  colour (a `CLAUDE_THEME` env var is an open upstream request,
-  anthropics/claude-code#10074). A query-answering pty shim inside the image
-  was considered and rejected: to answer it would need the host's background
-  colour — everything `resolve_theme` already does — plus a new moving part
-  in the image. That dead end is why the theme is resolved on the host at
-  all. If tmux ever answers OSC 11 on behalf of its client, or the monitor
-  passes queries through, auto would work end-to-end and `resolve_theme`
-  could go. One unresolved observation from the same harness: claude's
-  onboarding theme picker rendered byte-identically whether the query was
-  answered light, dark, or not at all — the reply was consumed but never
-  changed the UI, and the logged-in REPL wasn't reachable headless, so auto
-  may be dark-pinned in more places than tmux.
-- **`airlock remove` under `-r` also discards whatever lived on the sandbox
-  disk** — packages installed with `apt` or `pip` inside the VM, for
-  instance. The sandbox is state airlock rebuilds from the image, and the user's own
-  persisted state (`~/.claude` in the VM) is a mount from the host, which
-  survives.
+## Working on the script
 
-## Working on this script
-
-- Run `./test-airlock-claude` after any change. It drives the real script
-  against stub `docker`/`podman`/`airlock`/`df`/`git` binaries on a PATH built
-  from scratch, so it needs no container engine, no `airlock`, and no network,
-  and finishes in about a second. `-v` echoes each case's captured output.
-  Exit status is the result; add cases in the same shape when you add behavior.
-- What the suite cannot reach: anything that requires actually building the
-  image or booting a VM. The Dockerfile is only checked as *text* (it reaches
-  the build on stdin, starts at the right base, keeps the `ARG` pair below the
-  install layer, and every `RUN` parses as shell) — nothing verifies it
-  builds, that the wrapper updates, or that airlock accepts the generated
-  config. For those, run `./airlock-claude`
-  directly on a machine with `docker` or `podman` and the `airlock` CLI.
-- To iterate on the image without launching a session, extract the Dockerfile
-  heredoc, build it by hand, and probe it with
-  `docker run --rm ... claude --version`. Check the non-root case too
-  (`--user 1000:1000 -e HOME=/tmp/uhome`), since the VM user isn't guaranteed
-  to be root.
-- To re-test the build path itself, run `./airlock-claude -r` (or delete the
-  image with `docker rmi airlock-claude:latest`) — a plain run only builds when
-  the image is missing. Note `-r` is a full `--no-cache --pull` build, so it
-  takes minutes, not seconds.
-- `airlock.local.toml` is a runtime artifact produced by running the script
-  and is gitignored. Don't hand-edit it as a source file; it's regenerated
-  (clobbered) on every invocation of `airlock-claude`. `.airlock/` is in
-  `.gitignore` because an older airlock keeps the sandbox, VM disk included,
-  there; a current one keeps it in its data directory (`airlock info` shows
-  where).
-- `README.md` is the user-facing description of the same script. A change to
-  flags, prerequisites, or the launch line usually needs an edit there too.
+- Run `./test-airlock-claude` after any change. It drives the real
+  script against a stub `airlock` on a PATH built from scratch, so it
+  needs no `airlock`, no network, and finishes in about a second. `-v`
+  echoes each case's captured output. Add cases in the same shape when
+  you add behavior.
+- What the suite cannot reach: anything that boots a VM. The prelude
+  reaches `bash -c` as a file, parses under `bash -n`, and is run against
+  a substitute `/etc`, where the suite checks the files it writes and the
+  `exec` it ends with. Only `apk add tmux`, tmux itself and airlock's
+  acceptance of the launch remain outside the suite. For those, run
+  `./airlock-claude` on a machine with the `airlock` CLI.
+- `README.md` is the user-facing description. A change to flags or the
+  launch line usually needs an edit there too.
 
 ## Working on the test suite
 
-- **Every case runs in its own temp working directory, and no case may `cd`
-  into this repo.** The script writes `airlock.local.toml` into the current
-  directory and does `rm -rf .airlock` under `-r`, so a case that ran here
-  would clobber files. The `airlock` stub keeps its pretend sandbox at
-  `STUB_BOX`, under the case directory, the way airlock's data directory
-  is outside the project; its `info` answers with that path and its
-  `remove` deletes it together with `airlock.local.toml`, as the real one
-  does, so the suite can assert the config is regenerated afterwards.
-- **`PATH` is rebuilt from scratch for each case** — the stubs plus a symlink
-  directory (`TOOLS`) of the handful of real tools the script shells out to —
-  so a `docker` or `airlock` installed on the host can't leak in and quietly
-  turn a stub assertion into a real invocation. A tool the script newly
-  shells out to has to be added to `TOOLS`, or every case that reaches it
-  fails in a way that looks like the feature is broken.
-- **Stubs read their behavior from exported env vars** (`STUB_IMAGE_MISSING`,
-  `STUB_BUILD_FAILS`, `STUB_REMOVE_EXIT`, `STUB_NO_SANDBOX`, `STUB_GIT_NAME`, `STUB_GIT_EMAIL`),
-  which is what lets them be
-  written once as literal heredocs and varied per case. `new_case` resets them
-  all.
-- **A missing stub is expressed as a `stub_all_but_*` helper**, never as
-  omitted calls, because the absence is otherwise invisible at the call site.
-- **`assert_not_grep` fails on a missing file rather than passing.** An
-  absent-by-typo path would otherwise satisfy every "should not contain"
-  assertion in the suite.
-- Assertion labels carry the intent of each case — they are what a reader sees
-  on failure, so write them as the claim being tested ("`--no-monitor` drops
-  the monitor flag"), not as a description of the mechanics.
+- **Every case runs in its own temp working directory, and no case may
+  `cd` into this repo.** The `airlock` stub keeps its pretend sandbox at
+  `STUB_BOX`, under the case directory; its `info` answers with that path
+  and its `remove` deletes it, as the real one does.
+- **`PATH` is rebuilt from scratch for each case** — the stub plus a
+  symlink directory (`TOOLS`) of the real tools the script and the stub
+  shell out to. A tool the script newly uses has to be added to `TOOLS`,
+  or every case that reaches it fails in a way that looks like the
+  feature is broken.
+- **The stub writes the `bash -c` script argument to
+  `$CASE_DIR/session-script`** (the `SESSION_SCRIPT` helper names it) and
+  logs the argv with the script replaced by `<script>`, so launch
+  assertions stay one line and the prelude is checked as a file. Only the
+  first `-c` is taken, so a forwarded `sh -c …` isn't mistaken for it.
+- **Stubs read their behavior from exported env vars** (`STUB_PTY_DUMP`,
+  `STUB_EXIT`, `STUB_REMOVE_EXIT`, `STUB_NO_SANDBOX`, `DUMP_ARGV`), reset
+  in `new_case`.
+- **The `CONFIG` helper names `airlock.local.toml` in the case's work
+  directory; the stub's `remove` deletes only the pretend sandbox, as the
+  real one does, so the suite can assert what the script itself does to
+  the file.**
+- **A missing stub is expressed as `stub_all_but_airlock`**, never as an
+  omitted call.
+- **`assert_not_grep` fails on a missing file rather than passing.**
+- Assertion labels carry the intent of each case; write them as the claim
+  being tested, not as a description of the mechanics.

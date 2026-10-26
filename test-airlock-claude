@@ -62,7 +62,7 @@ assert_absent() {
 
 TOOLS=$TMPROOT/tools
 mkdir -p "$TOOLS"
-for t in sed tail cat rm chmod mkdir ls tr mv; do
+for t in sed tail cat tr mv rm mkdir; do
   p=$(command -v "$t") || { echo "required tool not found: $t" >&2; exit 1; }
   ln -s "$p" "$TOOLS/$t"
 done
@@ -77,34 +77,8 @@ new_case() {
   mkdir -p "$BIN" "$WORK" "$FAKE_HOME"
   : > "$LOG"
   export LOG CASE_DIR STUB_BOX
-  export STUB_IMAGE_MISSING= STUB_BUILD_FAILS= DUMP_ARGV=
-  export STUB_PTY_DUMP= STUB_EXIT= STUB_REMOVE_EXIT= STUB_NO_SANDBOX=
-  export STUB_GIT_NAME='Stub Name' STUB_GIT_EMAIL=stub@example.com
-  export DEFAULTS_MODE=dark
-  unset AIRLOCK_CLAUDE_SKIP_UPDATE AIRLOCK_CLAUDE_THEME COLORFGBG
-  unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+  export DUMP_ARGV= STUB_PTY_DUMP= STUB_EXIT= STUB_REMOVE_EXIT= STUB_NO_SANDBOX=
   RC=0
-}
-
-stub_engine() {
-  local engine=$1
-  cat > "$BIN/$engine" <<EOF
-#!/bin/sh
-NAME=$engine
-EOF
-  cat >> "$BIN/$engine" <<'EOF'
-case "$1" in
-  image) [ -n "${STUB_IMAGE_MISSING:-}" ] && exit 1; exit 0 ;;
-  build)
-    echo "BUILD($NAME): $*" >> "$LOG"
-    cat > "$CASE_DIR/Dockerfile"
-    [ -n "${STUB_BUILD_FAILS:-}" ] && exit 1
-    exit 0 ;;
-esac
-echo "$NAME REACHED: $*" >> "$LOG"
-exit 0
-EOF
-  chmod +x "$BIN/$engine"
 }
 
 stub_airlock() {
@@ -120,13 +94,23 @@ case "$1" in
     exit 0 ;;
   remove)
     echo "REMOVE: $*" >> "$LOG"
-    rm -rf "$STUB_BOX" airlock.local.toml
+    rm -rf "$STUB_BOX"
     exit "${STUB_REMOVE_EXIT:-0}" ;;
 esac
-echo "LAUNCH: $*" >> "$LOG"
-if [ -n "${DUMP_ARGV:-}" ]; then
-  for arg; do echo "ARGV[$arg]" >> "$LOG"; done
-fi
+LINE=
+NEXT_IS_SCRIPT=
+for arg; do
+  if [ -n "$NEXT_IS_SCRIPT" ]; then
+    printf '%s\n' "$arg" > "$CASE_DIR/session-script"
+    arg='<script>'
+    NEXT_IS_SCRIPT=
+  elif [ "$arg" = -c ] && [ ! -e "$CASE_DIR/session-script" ]; then
+    NEXT_IS_SCRIPT=1
+  fi
+  LINE="$LINE $arg"
+  if [ -n "${DUMP_ARGV:-}" ]; then echo "ARGV[$arg]" >> "$LOG"; fi
+done
+echo "LAUNCH:$LINE" >> "$LOG"
 echo "LAUNCH_PTY_DUMP: ${AIRLOCK_PTY_DUMP:-unset}" >> "$LOG"
 if [ -n "${STUB_PTY_DUMP:-}" ]; then
   mkdir -p "$STUB_BOX"
@@ -137,39 +121,8 @@ EOF
   chmod +x "$BIN/airlock"
 }
 
-stub_git() {
-  cat > "$BIN/git" <<'EOF'
-#!/bin/sh
-if [ "$1" = config ] && [ "$2" = --get ]; then
-  case "$3" in
-    user.name) [ -n "${STUB_GIT_NAME:-}" ] && echo "$STUB_GIT_NAME" ;;
-    user.email) [ -n "${STUB_GIT_EMAIL:-}" ] && echo "$STUB_GIT_EMAIL" ;;
-  esac
-  exit 0
-fi
-exit 0
-EOF
-  chmod +x "$BIN/git"
-}
-
-stub_defaults() {
-  cat > "$BIN/defaults" <<'EOF'
-#!/bin/sh
-case "${DEFAULTS_MODE:-dark}" in
-  dark) echo Dark ;;
-  light)
-    echo "The domain/default pair of (kCFPreferencesAnyApplication, AppleInterfaceStyle) does not exist" >&2
-    exit 1 ;;
-esac
-exit 0
-EOF
-  chmod +x "$BIN/defaults"
-}
-
-stub_all() { stub_engine docker; stub_airlock; stub_git; }
-stub_all_but_airlock() { stub_engine docker; stub_git; }
-stub_all_but_container_engine() { stub_airlock; stub_git; }
-stub_all_but_docker() { stub_engine podman; stub_airlock; stub_git; }
+stub_all() { stub_airlock; }
+stub_all_but_airlock() { :; }
 
 run_script() {
   ( cd "$WORK" && PATH="$BIN:$TOOLS" HOME="$FAKE_HOME" \
@@ -182,6 +135,7 @@ run_script() {
   return 0
 }
 
+SESSION_SCRIPT() { echo "$CASE_DIR/session-script"; }
 CONFIG() { echo "$WORK/airlock.local.toml"; }
 
 section "syntax"
@@ -197,10 +151,11 @@ run_script --help
 assert_rc 0 "$RC" "--help exits 0"
 assert_grep "Usage: airlock-claude" "$CASE_DIR/out" "--help prints usage to stdout"
 assert_grep "passed to claude verbatim" "$CASE_DIR/out" "--help documents -- forwarding"
-assert_grep "--theme <theme>" "$CASE_DIR/out" "--help documents --theme"
+assert_grep "\-M, --no-monitor" "$CASE_DIR/out" "--help documents --no-monitor"
+assert_grep "\-T, --no-tmux" "$CASE_DIR/out" "--help documents --no-tmux"
 assert_grep "\-x, --exec" "$CASE_DIR/out" "--help documents --exec"
-assert_grep "\--mount-rw <dir>" "$CASE_DIR/out" "--help documents --mount-rw"
-assert_grep "\--mount-ro <dir>" "$CASE_DIR/out" "--help documents --mount-ro"
+assert_grep "\-r, --rebuild" "$CASE_DIR/out" "--help documents --rebuild"
+assert_grep "setup wizard" "$CASE_DIR/out" "--help says the first run goes through airlock's wizard"
 assert_grep "pty.dump" "$CASE_DIR/out" "--help documents the session log"
 assert_grep "airlock info" "$CASE_DIR/out" "--help says where to find the sandbox directory the log is in"
 assert_not_grep "LAUNCH:" "$LOG" "--help does not launch"
@@ -217,12 +172,13 @@ new_case; stub_all
 run_script -r --help
 assert_rc 0 "$RC" "--help after another flag exits 0"
 assert_grep "Usage: airlock-claude" "$CASE_DIR/out" "--help after another flag still prints usage"
-assert_absent "$(CONFIG)" "--help after another flag does no work"
+assert_not_grep "REMOVE:" "$LOG" "--help after -r removes nothing"
 
 new_case; stub_all
 run_script --bogus
 assert_rc 2 "$RC" "unknown option exits 2"
 assert_grep "unknown option" "$CASE_DIR/err" "unknown option explains itself"
+assert_not_grep "LAUNCH:" "$LOG" "unknown option does not launch"
 
 new_case; stub_all
 run_script --bogus --help
@@ -240,237 +196,86 @@ assert_grep "claude --help" "$LOG" "--help after -- reaches claude"
 
 section "dependency checks"
 new_case; stub_all_but_airlock
-export STUB_IMAGE_MISSING=1
 run_script
 assert_rc 1 "$RC" "missing airlock exits 1"
 assert_grep "airlock not found in PATH" "$CASE_DIR/err" "missing airlock names the dependency"
-assert_not_grep "BUILD(" "$LOG" "missing airlock is caught before the build"
-assert_absent "$(CONFIG)" "missing airlock writes no config"
-
-new_case; stub_all_but_container_engine
-run_script
-assert_rc 1 "$RC" "no container engine exits 1"
-assert_grep "Neither docker nor podman" "$CASE_DIR/err" "no engine names the dependency"
-
-
-section "generated config"
-new_case; stub_all
-run_script
-assert_rc 0 "$RC" "happy path exits 0"
-assert_exists "$(CONFIG)" "config is written"
-assert_grep 'presets = \["claude-code", "debian", "python"\]' "$(CONFIG)" "config declares the claude-code, debian and python presets"
-assert_grep 'policy = "deny-by-default"' "$(CONFIG)" "config denies network by default"
-assert_grep 'name = "airlock-claude:latest"' "$(CONFIG)" "config points at the built image"
-assert_grep 'DISABLE_AUTOUPDATER = "1"' "$(CONFIG)" "config disables the background autoupdater"
-assert_not_grep "AIRLOCK_CLAUDE_SKIP_UPDATE" "$(CONFIG)" "opt-out absent when unset on the host"
-assert_grep '^resolution = "docker"$' "$(CONFIG)" "config names the engine that built the image"
-assert_grep '^anthropic = true$' "$(CONFIG)" "config turns on airlock's anthropic sign-in service"
-assert_eq "[network.services]" "$(grep -B1 '^anthropic = true$' "$(CONFIG)" | head -1)" \
-  "the service sits in its own [network.services] table"
-awk '/^\[env\]/{f=1;next} /^\[/{f=0} f' "$(CONFIG)" > "$CASE_DIR/env-table"
-assert_grep '^CLAUDE_CODE_OAUTH_TOKEN = { optional = true }$' "$CASE_DIR/env-table" \
-  "a missing host token no longer stops the start, so /login in the sandbox can take its place"
-assert_not_grep "middleware" "$(CONFIG)" "config adds no middleware of its own"
-
-new_case; stub_all
-export AIRLOCK_CLAUDE_SKIP_UPDATE=1
-run_script
-assert_grep "AIRLOCK_CLAUDE_SKIP_UPDATE" "$(CONFIG)" "opt-out present when set on the host"
-sed -n '/^\[env\]/,$p' "$(CONFIG)" > "$CASE_DIR/env-table"
-assert_grep "AIRLOCK_CLAUDE_SKIP_UPDATE" "$CASE_DIR/env-table" "opt-out sits inside the [env] table"
-
-new_case; stub_all
-mkdir -p "$WORK/airlock.local.toml"
-run_script
-assert_rc 1 "$RC" "unwritable config exits 1"
-assert_grep "could not write airlock.local.toml" "$CASE_DIR/err" "unwritable config says so"
-assert_not_grep "LAUNCH:" "$LOG" "unwritable config does not launch"
-
-section "git identity"
-new_case; stub_all
-run_script
-awk '/^\[env\]/{f=1;next} /^\[/{f=0} f' "$(CONFIG)" > "$CASE_DIR/env-table"
-assert_grep '^GIT_AUTHOR_NAME = "Stub Name"$' "$CASE_DIR/env-table" "the host's user.name becomes the author name, inside [env]"
-assert_grep '^GIT_AUTHOR_EMAIL = "stub@example.com"$' "$CASE_DIR/env-table" "the host's user.email becomes the author email"
-assert_grep '^GIT_COMMITTER_NAME = "Stub Name"$' "$CASE_DIR/env-table" "the committer name follows user.name too"
-assert_grep '^GIT_COMMITTER_EMAIL = "stub@example.com"$' "$CASE_DIR/env-table" "the committer email follows user.email too"
-
-new_case; stub_all
-export GIT_AUTHOR_NAME="Env Author"
-run_script
-assert_grep '^GIT_AUTHOR_NAME = "Env Author"$' "$(CONFIG)" "a GIT_AUTHOR_NAME set on the host wins over user.name"
-assert_grep '^GIT_COMMITTER_NAME = "Stub Name"$' "$(CONFIG)" "the committer name still falls back to user.name"
-
-new_case; stub_all
-export STUB_GIT_NAME= STUB_GIT_EMAIL=
-run_script
-assert_rc 0 "$RC" "a host without a git identity still launches"
-assert_not_grep "GIT_" "$(CONFIG)" "no host identity means no identity lines"
-
-new_case; stub_all
-export STUB_GIT_NAME='Jo "Dollar" $HOME\slash'
-run_script
-assert_eq 'GIT_AUTHOR_NAME = "Jo \"Dollar\" \\$HOME\\\\slash"' "$(grep '^GIT_AUTHOR_NAME' "$(CONFIG)")" \
-  "quotes, dollars and backslashes survive both TOML and airlock's template syntax"
-
-section "extra mounts"
-new_case; stub_all
-mkdir -p "$CASE_DIR/other"
-run_script --mount-rw "$CASE_DIR/other"
-assert_rc 0 "$RC" "--mount-rw with a directory exits 0"
-assert_grep '^\[mounts."other"\]$' "$(CONFIG)" "--mount-rw adds a mounts table named after the directory"
-assert_grep "^source = \"$CASE_DIR/other\"\$" "$(CONFIG)" "the mount's source is the host directory"
-assert_grep '^target = "other"$' "$(CONFIG)" "the mount's target is the basename, relative to the project"
-assert_grep '^read_only = false$' "$(CONFIG)" "--mount-rw mounts read-write"
-assert_grep "^LAUNCH:" "$LOG" "--mount-rw still launches"
-
-new_case; stub_all
-mkdir -p "$CASE_DIR/reference"
-run_script --mount-ro "$CASE_DIR/reference"
-assert_grep '^\[mounts."reference"\]$' "$(CONFIG)" "--mount-ro adds a mounts table"
-assert_grep '^read_only = true$' "$(CONFIG)" "--mount-ro mounts read-only"
-
-new_case; stub_all
-mkdir -p "$CASE_DIR/one" "$CASE_DIR/two" "$CASE_DIR/three"
-run_script --mount-rw "$CASE_DIR/one" --mount-rw "$CASE_DIR/two" --mount-ro "$CASE_DIR/three"
-assert_grep '^\[mounts."one"\]$' "$(CONFIG)" "the flags are repeatable (first)"
-assert_grep '^\[mounts."two"\]$' "$(CONFIG)" "the flags are repeatable (second)"
-assert_grep '^\[mounts."three"\]$' "$(CONFIG)" "read-write and read-only mounts combine"
-assert_eq "false
-false
-true" "$(sed -n 's/^read_only = //p' "$(CONFIG)")" "each mount keeps its own mode"
-
-new_case; stub_all
-mkdir -p "$CASE_DIR/joined"
-run_script --mount-ro="$CASE_DIR/joined"
-assert_grep '^\[mounts."joined"\]$' "$(CONFIG)" "--mount-ro=dir is the joined form"
-
-new_case; stub_all
-mkdir -p "$CASE_DIR/sibling"
-run_script --mount-rw ../sibling
-assert_grep "^source = \"$CASE_DIR/sibling\"\$" "$(CONFIG)" "a relative directory is resolved to its host path"
-
-new_case; stub_all
-mkdir -p "$CASE_DIR/with space" "$CASE_DIR/"'qu"ote'
-run_script --mount-rw "$CASE_DIR/with space" --mount-ro "$CASE_DIR/"'qu"ote'
-assert_grep '^\[mounts."with space"\]$' "$(CONFIG)" "a name with a space stays one TOML key"
-assert_grep '^\[mounts."qu\\"ote"\]$' "$(CONFIG)" "a double quote in the name is escaped in the key"
-assert_grep 'source = ".*qu\\"ote"' "$(CONFIG)" "a double quote in the path is escaped in the source"
-
-new_case; stub_all
-mkdir -p "$CASE_DIR/other"
-export AIRLOCK_CLAUDE_SKIP_UPDATE=1
-run_script --mount-rw "$CASE_DIR/other"
-awk '/^\[env\]/{f=1;next} /^\[/{f=0} f' "$(CONFIG)" > "$CASE_DIR/env-table"
-assert_grep "AIRLOCK_CLAUDE_SKIP_UPDATE" "$CASE_DIR/env-table" \
-  "mount tables come after [env], leaving its entries inside it"
-
-new_case; stub_all
-mkdir -p "$CASE_DIR/other"
-run_script --mount-ro "$CASE_DIR/other" -x -- bash
-assert_rc 0 "$RC" "mounts combine with -x"
-assert_grep '^\[mounts."other"\]$' "$(CONFIG)" "the mount reaches the config with -x"
-
-new_case; stub_all
-run_script --mount-rw
-assert_rc 2 "$RC" "--mount-rw without a value exits 2"
-assert_grep "needs a directory" "$CASE_DIR/err" "missing mount value explains itself"
-
-new_case; stub_all
-run_script --mount-ro "$CASE_DIR/does-not-exist"
-assert_rc 2 "$RC" "a nonexistent mount directory exits 2"
-assert_grep "not a directory" "$CASE_DIR/err" "a nonexistent mount directory explains itself"
-assert_absent "$(CONFIG)" "a bad mount writes no config"
-assert_not_grep "LAUNCH:" "$LOG" "a bad mount does not launch"
-
-new_case; stub_all
-touch "$CASE_DIR/plain-file"
-run_script --mount-rw "$CASE_DIR/plain-file"
-assert_rc 2 "$RC" "a file as a mount source exits 2"
-
-new_case; stub_all
-mkdir -p "$CASE_DIR/a/same" "$CASE_DIR/b/same"
-run_script --mount-rw "$CASE_DIR/a/same" --mount-ro "$CASE_DIR/b/same"
-assert_rc 2 "$RC" "two mounts with one basename exit 2"
-assert_grep "both appear as ./same" "$CASE_DIR/err" "the basename collision is named"
-
-new_case; stub_all
-run_script --mount-rw .
-assert_rc 2 "$RC" "mounting the project directory itself exits 2"
-assert_grep "always mounted" "$CASE_DIR/err" "the project-directory mount explains itself"
-
-new_case; stub_all
-run_script --mount-ro /
-assert_rc 2 "$RC" "mounting the filesystem root exits 2"
+assert_not_grep "LAUNCH:" "$LOG" "missing airlock does not launch"
 
 section "launch"
 new_case; stub_all
 run_script
-assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude" \
+assert_rc 0 "$RC" "happy path exits 0"
+assert_eq "LAUNCH: start --monitor --network deny-by-default -- bash -c <script> airlock-claude claude" \
   "$(grep '^LAUNCH:' "$LOG")" "launch argv is exact"
 assert_not_grep "dangerously-skip-permissions" "$LOG" "launch passes no permission flag"
-
-new_case; stub_all
-run_script --monitor
-assert_grep "LAUNCH: start --monitor --" "$LOG" "--monitor asks for what is already the default"
+assert_absent "$WORK/airlock.local.toml" "no config file is written; the wizard and the project's own config decide"
+assert_absent "$WORK/.airlock" "nothing is written into the project directory"
+assert_exists "$(SESSION_SCRIPT)" "the sandbox-side script travels as the one argument of bash -c"
 
 new_case; stub_all
 run_script --no-monitor
-assert_eq "LAUNCH: start -- tmux -u new-session -A -s claude claude" \
-  "$(grep '^LAUNCH:' "$LOG")" "--no-monitor drops the monitor flag"
+assert_eq "LAUNCH: start --network deny-by-default -- bash -c <script> airlock-claude claude" \
+  "$(grep '^LAUNCH:' "$LOG")" "--no-monitor drops the monitor flag and keeps the policy"
 
 new_case; stub_all
 run_script -M
 assert_not_grep "monitor" "$LOG" "-M is the short form"
 
 new_case; stub_all
-run_script --tmux
-assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude" \
-  "$(grep '^LAUNCH:' "$LOG")" "--tmux asks for what is already the default"
-
-new_case; stub_all
 run_script --no-tmux
-assert_eq "LAUNCH: start --monitor -- claude" \
-  "$(grep '^LAUNCH:' "$LOG")" "--no-tmux runs claude directly"
+assert_eq "LAUNCH: start --monitor --network deny-by-default -- bash -c <script> airlock-claude claude" \
+  "$(grep '^LAUNCH:' "$LOG")" "--no-tmux changes the sandbox-side script, not the launch argv"
+assert_eq 'exec "$@"' "$(tail -n 1 "$(SESSION_SCRIPT)")" "--no-tmux hands straight to the command"
+assert_not_grep "exec tmux" "$(SESSION_SCRIPT)" "--no-tmux does not launch tmux"
 
 new_case; stub_all
 run_script -T
-assert_not_grep "tmux" "$LOG" "-T is the short form"
+assert_not_grep "exec tmux" "$(SESSION_SCRIPT)" "-T is the short form"
+
+new_case; stub_all
+run_script
+EXPECTED_HANDOFF=$(cat <<'EOF'
+exec tmux -u new-session -A -s claude "$(printf '%q ' "$@")"
+EOF
+)
+assert_eq "$EXPECTED_HANDOFF" "$(tail -n 1 "$(SESSION_SCRIPT)")" \
+  "by default the last line hands the words to tmux, each re-quoted with %q so a multi-word word survives tmux's join"
 
 new_case; stub_all
 run_script -M -T
-assert_eq "LAUNCH: start -- claude" \
-  "$(grep '^LAUNCH:' "$LOG")" "-M and -T together strip both wrappers"
+assert_eq "LAUNCH: start --network deny-by-default -- bash -c <script> airlock-claude claude" \
+  "$(grep '^LAUNCH:' "$LOG")" "-M and -T together still impose the policy"
 
 new_case; stub_all
 run_script -- --resume
-assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude --resume" \
+assert_eq "LAUNCH: start --monitor --network deny-by-default -- bash -c <script> airlock-claude claude --resume" \
   "$(grep '^LAUNCH:' "$LOG")" "arguments after -- reach claude"
 
 new_case; stub_all
 run_script --
-assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude" \
+assert_eq "LAUNCH: start --monitor --network deny-by-default -- bash -c <script> airlock-claude claude" \
   "$(grep '^LAUNCH:' "$LOG")" "a bare -- forwards nothing"
 
 new_case; stub_all
 export DUMP_ARGV=1
 run_script -M -T -- -p "multi word prompt"
-assert_eq "LAUNCH: start -- claude -p multi word prompt" \
+assert_eq "LAUNCH: start --network deny-by-default -- bash -c <script> airlock-claude claude -p multi word prompt" \
   "$(grep '^LAUNCH:' "$LOG")" "forwarded arguments combine with wrapper flags"
 assert_grep 'ARGV\[multi word prompt\]' "$LOG" "a multi-word argument survives as one word"
+assert_grep 'ARGV\[airlock-claude\]' "$LOG" "the script name is the \$0 of bash -c, ahead of the words"
 
 section "exec"
 new_case; stub_all
 run_script -x -- bash
 assert_rc 0 "$RC" "-x with a command exits 0"
-assert_eq "LAUNCH: start --monitor -- tmux -u new-session -A -s claude bash" \
+assert_eq "LAUNCH: start --monitor --network deny-by-default -- bash -c <script> airlock-claude bash" \
   "$(grep '^LAUNCH:' "$LOG")" "-x replaces claude with the command after --"
-assert_not_grep " claude claude" "$LOG" "claude itself is gone from the launch"
+assert_not_grep "airlock-claude claude" "$LOG" "claude itself is gone from the launch"
 
 new_case; stub_all
 export DUMP_ARGV=1
 run_script -M -T --exec -- sh -c "echo two words"
-assert_eq "LAUNCH: start -- sh -c echo two words" \
+assert_eq "LAUNCH: start --network deny-by-default -- bash -c <script> airlock-claude sh -c echo two words" \
   "$(grep '^LAUNCH:' "$LOG")" "--exec combines with the wrapper flags"
 assert_grep 'ARGV\[echo two words\]' "$LOG" "a multi-word command argument survives as one word"
 
@@ -484,217 +289,101 @@ new_case; stub_all
 run_script -x --
 assert_rc 2 "$RC" "-x with an empty -- exits 2"
 
-new_case; stub_all
-run_script -x --theme dark -- bash
-assert_rc 2 "$RC" "-x with --theme exits 2"
-assert_grep "theme configures claude" "$CASE_DIR/err" "-x with --theme names the conflict"
-
-new_case; stub_all
-export AIRLOCK_CLAUDE_THEME=light
-run_script -x -- bash
-assert_rc 0 "$RC" "the env theme does not block -x"
-assert_not_grep "settings" "$LOG" "the env theme is not passed to the command"
-
-new_case; stub_all; stub_defaults
-run_script -x -- bash
-assert_not_grep "settings" "$LOG" "no theme is detected for -x"
-
-section "theme"
-new_case; stub_all
-run_script --theme dark
-assert_eq 'LAUNCH: start --monitor -- tmux -u new-session -A -s claude claude --settings {"theme":"dark"}' \
-  "$(grep '^LAUNCH:' "$LOG")" "--theme hands claude the theme as settings JSON"
-
-new_case; stub_all
-export DUMP_ARGV=1
-run_script --theme dark
-assert_grep 'ARGV\[{"theme":"dark"}\]' "$LOG" "the settings JSON survives as one word"
-
-new_case; stub_all
-run_script --theme=light
-assert_grep '{"theme":"light"}' "$LOG" "--theme=value is the joined form"
-
-new_case; stub_all
-run_script -T --theme dark -- --resume
-assert_eq 'LAUNCH: start --monitor -- claude --settings {"theme":"dark"} --resume' \
-  "$(grep '^LAUNCH:' "$LOG")" "the theme comes before the forwarded arguments"
-
-new_case; stub_all
-run_script --theme purple
-assert_rc 2 "$RC" "unknown theme exits 2"
-assert_grep "unknown theme" "$CASE_DIR/err" "unknown theme explains itself"
-assert_not_grep "LAUNCH:" "$LOG" "unknown theme does not launch"
-
-new_case; stub_all
-run_script --theme
-assert_rc 2 "$RC" "--theme without a value exits 2"
-assert_grep "needs a value" "$CASE_DIR/err" "missing theme value explains itself"
-
-new_case; stub_all
-export AIRLOCK_CLAUDE_THEME=light
-run_script
-assert_grep '{"theme":"light"}' "$LOG" "AIRLOCK_CLAUDE_THEME sets the theme from the host env"
-
-new_case; stub_all
-export AIRLOCK_CLAUDE_THEME=light
-run_script --theme dark
-assert_grep '{"theme":"dark"}' "$LOG" "--theme wins over AIRLOCK_CLAUDE_THEME"
-assert_not_grep '{"theme":"light"}' "$LOG" "the losing env theme does not also ride along"
-
-new_case; stub_all
-export AIRLOCK_CLAUDE_THEME=purple
-run_script
-assert_rc 2 "$RC" "an invalid AIRLOCK_CLAUDE_THEME exits 2"
-
-new_case; stub_all; stub_defaults
-run_script
-assert_grep '{"theme":"dark"}' "$LOG" "a dark macOS appearance selects the dark theme"
-
-new_case; stub_all; stub_defaults
-export DEFAULTS_MODE=light
-run_script
-assert_grep '{"theme":"light"}' "$LOG" "a light macOS appearance selects the light theme"
-
-new_case; stub_all
-export COLORFGBG="15;0"
-run_script
-assert_grep '{"theme":"dark"}' "$LOG" "a dark COLORFGBG background selects the dark theme"
-
-new_case; stub_all
-export COLORFGBG="0;15"
-run_script
-assert_grep '{"theme":"light"}' "$LOG" "a light COLORFGBG background selects the light theme"
-
-new_case; stub_all; stub_defaults
-export COLORFGBG="0;15"
-run_script
-assert_grep '{"theme":"dark"}' "$LOG" "the macOS appearance outranks the COLORFGBG heuristic"
-
-new_case; stub_all
-export COLORFGBG="default;default"
-run_script
-assert_not_grep "settings" "$LOG" "an unusable COLORFGBG is ignored"
-
+section "session script"
 new_case; stub_all
 run_script
-assert_not_grep "settings" "$LOG" "no theme answer means no settings flag"
-
-section "image build"
-new_case; stub_all
-run_script
-assert_not_grep "BUILD(" "$LOG" "existing image is not rebuilt"
-
-new_case; stub_all
-export STUB_IMAGE_MISSING=1
-run_script
-assert_grep "BUILD(docker)" "$LOG" "missing image triggers a build"
-assert_not_grep "no-cache" "$LOG" "implicit build keeps the layer cache"
-assert_not_grep "build-arg" "$LOG" "the build bakes nothing host-specific into the image"
-
-new_case; stub_all
-run_script -r
-assert_grep "no-cache" "$LOG" "-r discards the layer cache"
-assert_grep "pull" "$LOG" "-r re-pulls the base image"
-
-new_case; stub_all
-export STUB_IMAGE_MISSING=1 STUB_BUILD_FAILS=1
-run_script
-assert_rc 1 "$RC" "failed build exits 1"
-assert_not_grep "LAUNCH:" "$LOG" "failed build does not launch"
-
-section "generated Dockerfile"
-new_case; stub_all
-export STUB_IMAGE_MISSING=1
-run_script
-assert_exists "$CASE_DIR/Dockerfile" "Dockerfile reaches the build on stdin"
-assert_eq "FROM python:3.14-slim" "$(head -1 "$CASE_DIR/Dockerfile")" "Dockerfile starts at the base image"
-assert_grep "claude.ai/install.sh" "$CASE_DIR/Dockerfile" "Dockerfile installs Claude Code"
-assert_grep "usr/local/bin/claude" "$CASE_DIR/Dockerfile" "Dockerfile writes the updating wrapper"
-assert_grep "unzip openssh-client" "$CASE_DIR/Dockerfile" "Dockerfile keeps the base package list"
-assert_grep "^ *tmux locales ncurses-term vim \\\\$" "$CASE_DIR/Dockerfile" \
-  "Dockerfile installs tmux, locales, ncurses-term and vim, and nothing else"
-assert_grep "apt-get install -y --reinstall ncurses-base" "$CASE_DIR/Dockerfile" \
-  "Dockerfile reinstalls ncurses-base to restore the entries ncurses-term hides"
-assert_eq "ncurses-term
-ncurses-base" "$(grep -o 'ncurses-term\|--reinstall ncurses-base' "$CASE_DIR/Dockerfile" | sed 's/--reinstall //')" \
-  "the ncurses-base reinstall comes after ncurses-term"
-assert_grep "^ENV LANG=en_US.UTF-8$" "$CASE_DIR/Dockerfile" "Dockerfile sets a UTF-8 locale"
-assert_grep "nvm-sh/nvm/v[0-9.]*/install.sh" "$CASE_DIR/Dockerfile" "Dockerfile installs a pinned nvm"
-assert_grep "^ENV NVM_DIR=/opt/nvm$" "$CASE_DIR/Dockerfile" "nvm lives at a fixed path outside any home directory"
-assert_grep '^RUN mkdir -p "$NVM_DIR" \\$' "$CASE_DIR/Dockerfile" \
-  "NVM_DIR exists before the installer runs, which refuses a set-but-missing NVM_DIR"
-assert_grep "nvm install --lts" "$CASE_DIR/Dockerfile" "Dockerfile installs the latest LTS Node through nvm"
-assert_grep '^ENV PATH=.*:/opt/nvm/current/bin' "$CASE_DIR/Dockerfile" \
-  "the installed node is on PATH without any shell sourcing nvm"
-assert_grep '"$NVM_DIR/current"' "$CASE_DIR/Dockerfile" "the PATH entry is a symlink nvm points at the default version"
-assert_grep "/etc/profile.d/nvm.sh" "$CASE_DIR/Dockerfile" "login shells get the nvm command"
-assert_grep '^ *'"'"'  \*) PATH="$PATH:/opt/nvm/current/bin" ;;'"'"' \\$' "$CASE_DIR/Dockerfile" \
-  "profile.d puts node back on PATH after /etc/profile resets it for login shells"
-assert_grep "must source /opt/nvm/nvm.sh" "$CASE_DIR/Dockerfile" \
-  "system memory tells Claude Code how to reach nvm from a non-login shell"
-assert_grep "Never add notes about how something used to work" "$CASE_DIR/Dockerfile" \
-  "system memory forbids history in comments and docs"
-assert_grep 'chmod -R a+rwX "$NVM_DIR"' "$CASE_DIR/Dockerfile" "nvm tree stays writable for a non-root VM user"
-assert_grep "en_US.UTF-8 UTF-8' > /etc/locale.gen" "$CASE_DIR/Dockerfile" "Dockerfile seeds locale.gen with that locale"
-assert_grep "locale-gen" "$CASE_DIR/Dockerfile" "Dockerfile generates it"
-assert_grep "etc/claude-code/managed-settings.json" "$CASE_DIR/Dockerfile" \
-  "Dockerfile writes the system Claude Code settings"
-assert_grep '"defaultMode": "bypassPermissions"' "$CASE_DIR/Dockerfile" \
-  "system settings bypass permission prompts"
-assert_grep '"skipDangerousModePermissionPrompt": true' "$CASE_DIR/Dockerfile" \
-  "system settings pre-accept the bypass warning"
-assert_grep "etc/claude-code/CLAUDE.md" "$CASE_DIR/Dockerfile" \
-  "Dockerfile writes the system Claude Code memory"
-assert_grep "denied by network policy" "$CASE_DIR/Dockerfile" \
-  "system memory describes the 403 the proxy answers denied requests with"
-assert_grep "remind them to revert the airlock" "$CASE_DIR/Dockerfile" \
-  "system memory tells Claude Code it can ask for temporary network access"
-assert_grep "VERIFY_X509_STRICT" "$CASE_DIR/Dockerfile" \
-  "system memory tells Claude Code how to get Python past the TLS proxy"
-assert_grep "delete or overwrite a virtualenv you did not create in this session" \
-  "$CASE_DIR/Dockerfile" "system memory keeps Claude Code out of the host's virtualenvs"
-assert_not_grep "^ *'[^']*'[^']*' \\\\$" "$CASE_DIR/Dockerfile" \
-  "printf'd file content has no apostrophe to break its single quotes"
-if awk '/^RUN /{blk=""; grab=1} grab{blk=blk $0 "\n"} grab && !/\\$/{grab=0; print blk "\n"}' \
-     "$CASE_DIR/Dockerfile" | sed 's/^RUN //' | sh -n 2>/dev/null; then
-  pass "every RUN command parses as shell"
+if bash -n "$(SESSION_SCRIPT)" 2>"$CASE_DIR/ss.err"; then
+  pass "the sandbox-side script parses under bash -n"
 else
-  fail "every RUN command parses as shell"
+  fail "the sandbox-side script parses under bash -n" "$(cat "$CASE_DIR/ss.err")"
 fi
-assert_grep "etc/tmux.conf" "$CASE_DIR/Dockerfile" "Dockerfile writes the system tmux config"
-assert_grep "set -g mouse on" "$CASE_DIR/Dockerfile" "system tmux config turns the mouse on"
-assert_not_grep "git config" "$CASE_DIR/Dockerfile" "the image carries no git identity"
+assert_eq 'command -v tmux >/dev/null 2>&1 || apk add --quiet tmux || exit 1' \
+  "$(sed -n 1p "$(SESSION_SCRIPT)")" "tmux is installed first, only if missing, and a failed install stops the session"
+assert_grep "^cat > /etc/tmux.conf <<" "$(SESSION_SCRIPT)" "the system tmux config is written on every launch"
+assert_grep "^set -g mouse on$" "$(SESSION_SCRIPT)" "tmux config turns the mouse on"
+assert_grep "^set -g set-clipboard on$" "$(SESSION_SCRIPT)" "tmux config forwards copies to the host clipboard"
+assert_grep '^set -as terminal-features ",\*:clipboard"$' "$(SESSION_SCRIPT)" "tmux config asserts OSC 52 support for every terminal"
+assert_grep '^set -g default-terminal "tmux-256color"$' "$(SESSION_SCRIPT)" "tmux config keeps 256 colours"
+assert_grep "^mkdir -p /etc/claude-code$" "$(SESSION_SCRIPT)" "the managed Claude Code directory is created"
+assert_grep "^cat > /etc/claude-code/managed-settings.json <<" "$(SESSION_SCRIPT)" "the managed settings are written on every launch"
+assert_grep '"defaultMode": "bypassPermissions"' "$(SESSION_SCRIPT)" "managed settings bypass permission prompts"
+assert_grep '"skipDangerousModePermissionPrompt": true' "$(SESSION_SCRIPT)" "managed settings pre-accept the bypass warning"
+assert_grep "^cat > /etc/claude-code/CLAUDE.md <<" "$(SESSION_SCRIPT)" "the managed memory is written on every launch"
+assert_grep "denied by network policy" "$(SESSION_SCRIPT)" "managed memory describes the 403 the proxy answers denied requests with"
+assert_grep "remind them to revert the airlock" "$(SESSION_SCRIPT)" "managed memory tells Claude Code it can ask for temporary network access"
+assert_grep "Alpine Linux on musl" "$(SESSION_SCRIPT)" "managed memory says the sandbox is Alpine on musl and packages come from apk"
+assert_grep "VERIFY_X509_STRICT" "$(SESSION_SCRIPT)" "managed memory tells Claude Code how to get Python past the TLS proxy"
+assert_grep "delete or overwrite a virtualenv you did not create in this session" "$(SESSION_SCRIPT)" \
+  "managed memory keeps Claude Code out of the host's virtualenvs"
+assert_grep "Never add notes about how something used to work" "$(SESSION_SCRIPT)" "managed memory forbids history in comments and docs"
+assert_not_grep "nvm" "$(SESSION_SCRIPT)" "managed memory carries nothing about the old image's nvm"
+assert_eq "1" "$(grep -c '^exec ' "$(SESSION_SCRIPT)")" "exactly one exec line hands off"
 
-section "sandbox removal on rebuild"
 new_case; stub_all
-mkdir -p "$WORK/.airlock/sandbox"; : > "$WORK/.airlock/sandbox/disk"
+run_script -T
+assert_not_grep "apk add --quiet tmux" "$(SESSION_SCRIPT)" "-T installs no tmux"
+assert_grep "^cat > /etc/tmux.conf <<" "$(SESSION_SCRIPT)" "-T still writes the tmux config, for a tmux started by hand"
+assert_grep "/etc/claude-code/CLAUDE.md" "$(SESSION_SCRIPT)" "-T still writes the managed memory"
+assert_eq 'exec "$@"' "$(tail -n 1 "$(SESSION_SCRIPT)")" "-T ends with a plain exec"
+
+new_case; stub_all
+run_script -T
+mkdir -p "$CASE_DIR/etc"
+sed "s#/etc/#$CASE_DIR/etc/#g" "$(SESSION_SCRIPT)" > "$CASE_DIR/prelude"
+bash -c "$(cat "$CASE_DIR/prelude")" airlock-claude true > "$CASE_DIR/prelude.out" 2>&1
+assert_rc 0 "$?" "running the prelude against a substitute /etc succeeds and reaches the handoff"
+assert_exists "$CASE_DIR/etc/tmux.conf" "running the prelude writes the tmux config"
+assert_exists "$CASE_DIR/etc/claude-code/managed-settings.json" "running the prelude writes the managed settings"
+assert_exists "$CASE_DIR/etc/claude-code/CLAUDE.md" "running the prelude writes the managed memory"
+EXPECTED_TMUX_CONF=$(cat <<'EOF'
+set -g mouse on
+set -g set-clipboard on
+set -as terminal-features ",*:clipboard"
+set -g default-terminal "tmux-256color"
+EOF
+)
+assert_eq "$EXPECTED_TMUX_CONF" "$(cat "$CASE_DIR/etc/tmux.conf")" "the written tmux config is exactly the four settings"
+assert_grep '"defaultMode": "bypassPermissions"' "$CASE_DIR/etc/claude-code/managed-settings.json" \
+  "the written managed settings bypass permission prompts"
+assert_grep 'ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT' "$CASE_DIR/etc/claude-code/CLAUDE.md" \
+  "the written memory keeps & and ~ through both heredoc layers"
+assert_grep 'kwargs\["ssl_context"\] = ctx' "$CASE_DIR/etc/claude-code/CLAUDE.md" \
+  "the written memory keeps quotes and brackets through both heredoc layers"
+assert_eq "the commit message, and nowhere else." "$(tail -n 1 "$CASE_DIR/etc/claude-code/CLAUDE.md")" \
+  "the written memory runs to its last line, with nothing swallowed after it"
+assert_not_grep "^\(TMUX_CONF\|SETTINGS\|CLAUDE_MD\)$" "$CASE_DIR/etc/tmux.conf" "no heredoc terminator leaks into the tmux config"
+assert_not_grep "^\(TMUX_CONF\|SETTINGS\|CLAUDE_MD\)$" "$CASE_DIR/etc/claude-code/managed-settings.json" "no heredoc terminator leaks into the managed settings"
+assert_not_grep "^\(TMUX_CONF\|SETTINGS\|CLAUDE_MD\)$" "$CASE_DIR/etc/claude-code/CLAUDE.md" "no heredoc terminator leaks into the managed memory"
+
+new_case; stub_all
+run_script -x -- bash
+assert_grep "/etc/claude-code/managed-settings.json" "$(SESSION_SCRIPT)" "-x sessions get the same prelude"
+assert_grep "apk add --quiet tmux" "$(SESSION_SCRIPT)" "-x under tmux installs tmux too"
+
+section "rebuild"
+new_case; stub_all
 run_script
 assert_not_grep "^REMOVE:" "$LOG" "a plain run keeps the sandbox"
-assert_exists "$WORK/.airlock/sandbox/disk" "a plain run leaves a legacy in-project sandbox for airlock to import"
 
 new_case; stub_all
-mkdir -p "$WORK/.airlock/sandbox"; : > "$WORK/.airlock/sandbox/disk"
+mkdir -p "$STUB_BOX"; : > "$STUB_BOX/disk.img"
 run_script -r
+assert_rc 0 "$RC" "-r exits 0"
 assert_grep "^REMOVE: remove --force$" "$LOG" "-r removes the sandbox through airlock, without a prompt"
-assert_absent "$WORK/.airlock" "-r also drops a legacy in-project sandbox"
+assert_absent "$STUB_BOX/disk.img" "the sandbox disk is gone"
 assert_eq "REMOVE" "$(grep -o '^REMOVE\|^LAUNCH' "$LOG" | head -1)" "the removal happens before the launch"
-assert_exists "$(CONFIG)" "the config is written after the removal, which deletes the local config"
-assert_grep "LAUNCH: start" "$LOG" "-r still launches"
+assert_grep "^LAUNCH: start" "$LOG" "-r still launches, which brings the wizard back"
+
+new_case; stub_all
+run_script --rebuild
+assert_grep "^REMOVE: remove --force$" "$LOG" "--rebuild is the long form"
 
 new_case; stub_all
 export STUB_REMOVE_EXIT=1
 run_script -r
 assert_rc 1 "$RC" "a failed removal exits 1"
 assert_not_grep "^LAUNCH:" "$LOG" "a failed removal does not launch on the old sandbox"
-
-section "podman"
-new_case; stub_all_but_docker
-export STUB_IMAGE_MISSING=1
-run_script
-assert_rc 0 "$RC" "podman-only host launches"
-assert_grep "BUILD(podman)" "$LOG" "podman builds the image"
-assert_grep '^resolution = "podman"$' "$(CONFIG)" "config tells airlock to resolve the image from podman"
-assert_not_grep "docker" "$(CONFIG)" "docker is not mentioned to airlock on a podman host"
+assert_grep "not launching on the old sandbox" "$CASE_DIR/err" "a failed removal says why the run stops"
 
 section "session log"
 new_case; stub_all
@@ -750,6 +439,227 @@ run_script
 assert_rc 0 "$RC" "an unresolvable sandbox directory does not fail the run"
 assert_not_grep "last session output" "$CASE_DIR/err" "no sandbox directory means no tail"
 assert_not_grep "No sandbox for" "$CASE_DIR/err" "airlock info's complaint stays silent"
+
+section "extra mounts"
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 0 "$RC" "--mount-rw with a directory exits 0"
+assert_grep '^\[mounts."other"\]$' "$(CONFIG)" "--mount-rw adds a mounts table named after the directory"
+assert_grep "^source = \"$CASE_DIR/other\"\$" "$(CONFIG)" "the mount's source is the host directory"
+assert_grep '^target = "other"$' "$(CONFIG)" "the mount's target is the basename, relative to the project"
+assert_grep '^read_only = false$' "$(CONFIG)" "--mount-rw mounts read-write"
+assert_eq "# BEGIN airlock-claude mounts (rewritten on every airlock-claude run)" "$(sed -n 1p "$(CONFIG)")" \
+  "the block opens with its marker, which says the block is the script's"
+assert_eq "# END airlock-claude mounts" "$(tail -n 1 "$(CONFIG)")" "the block closes with its marker"
+assert_grep "^LAUNCH:" "$LOG" "--mount-rw still launches"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/reference"
+run_script --mount-ro "$CASE_DIR/reference"
+assert_grep '^\[mounts."reference"\]$' "$(CONFIG)" "--mount-ro adds a mounts table"
+assert_grep '^read_only = true$' "$(CONFIG)" "--mount-ro mounts read-only"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/one" "$CASE_DIR/two" "$CASE_DIR/three"
+run_script --mount-rw "$CASE_DIR/one" --mount-rw "$CASE_DIR/two" --mount-ro "$CASE_DIR/three"
+assert_grep '^\[mounts."one"\]$' "$(CONFIG)" "the flags are repeatable (first)"
+assert_grep '^\[mounts."two"\]$' "$(CONFIG)" "the flags are repeatable (second)"
+assert_grep '^\[mounts."three"\]$' "$(CONFIG)" "read-write and read-only mounts combine"
+assert_eq "false
+false
+true" "$(sed -n 's/^read_only = //p' "$(CONFIG)")" "each mount keeps its own mode"
+assert_eq "1" "$(grep -c '^# BEGIN airlock-claude mounts' "$(CONFIG)")" "all mounts share one block"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/joined"
+run_script --mount-ro="$CASE_DIR/joined"
+assert_grep '^\[mounts."joined"\]$' "$(CONFIG)" "--mount-ro=dir is the joined form"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/sibling"
+run_script --mount-rw ../sibling
+assert_grep "^source = \"$CASE_DIR/sibling\"\$" "$(CONFIG)" "a relative directory is resolved to its host path"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/with space" "$CASE_DIR/"'qu"ote'
+run_script --mount-rw "$CASE_DIR/with space" --mount-ro "$CASE_DIR/"'qu"ote'
+assert_grep '^\[mounts."with space"\]$' "$(CONFIG)" "a name with a space stays one TOML key"
+assert_grep '^\[mounts."qu\\"ote"\]$' "$(CONFIG)" "a double quote in the name is escaped in the key"
+assert_grep 'source = ".*qu\\"ote"' "$(CONFIG)" "a double quote in the path is escaped in the source"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+run_script --mount-ro "$CASE_DIR/other" -x -- bash
+assert_rc 0 "$RC" "mounts combine with -x"
+assert_grep '^\[mounts."other"\]$' "$(CONFIG)" "the mount reaches the config with -x"
+
+new_case; stub_all
+run_script --mount-rw
+assert_rc 2 "$RC" "--mount-rw without a value exits 2"
+assert_grep "needs a directory" "$CASE_DIR/err" "missing mount value explains itself"
+
+new_case; stub_all
+run_script --mount-ro "$CASE_DIR/does-not-exist"
+assert_rc 2 "$RC" "a nonexistent mount directory exits 2"
+assert_grep "not a directory" "$CASE_DIR/err" "a nonexistent mount directory explains itself"
+assert_absent "$(CONFIG)" "a bad mount writes no config"
+assert_not_grep "LAUNCH:" "$LOG" "a bad mount does not launch"
+
+new_case; stub_all
+touch "$CASE_DIR/plain-file"
+run_script --mount-rw "$CASE_DIR/plain-file"
+assert_rc 2 "$RC" "a file as a mount source exits 2"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/a/same" "$CASE_DIR/b/same"
+run_script --mount-rw "$CASE_DIR/a/same" --mount-ro "$CASE_DIR/b/same"
+assert_rc 2 "$RC" "two mounts with one basename exit 2"
+assert_grep "both appear as ./same" "$CASE_DIR/err" "the basename collision is named"
+
+new_case; stub_all
+run_script --mount-rw .
+assert_rc 2 "$RC" "mounting the project directory itself exits 2"
+assert_grep "always mounted" "$CASE_DIR/err" "the project-directory mount explains itself"
+
+new_case; stub_all
+run_script --mount-ro /
+assert_rc 2 "$RC" "mounting the filesystem root exits 2"
+
+section "mounts and the local config file"
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+printf '[vm]\ncpus = 2\n' > "$(CONFIG)"
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 0 "$RC" "an existing airlock.local.toml is accepted"
+assert_eq "[vm]" "$(sed -n 1p "$(CONFIG)")" "content already in the file stays first"
+assert_grep '^cpus = 2$' "$(CONFIG)" "content already in the file is kept"
+assert_eq "# END airlock-claude mounts" "$(tail -n 1 "$(CONFIG)")" "the block is appended after it"
+assert_eq "" "$(sed -n 3p "$(CONFIG)")" "one blank line separates the kept content from the block"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/one" "$CASE_DIR/two"
+run_script --mount-rw "$CASE_DIR/one"
+run_script --mount-ro "$CASE_DIR/two"
+assert_not_grep '"one"' "$(CONFIG)" "the next run's block replaces the previous mounts"
+assert_grep '^\[mounts."two"\]$' "$(CONFIG)" "the next run's mounts are in"
+assert_eq "1" "$(grep -c '^# BEGIN airlock-claude mounts' "$(CONFIG)")" "replacing leaves one block, not two"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+printf '[vm]\ncpus = 2\n' > "$(CONFIG)"
+run_script --mount-rw "$CASE_DIR/other"
+run_script
+assert_rc 0 "$RC" "a run without mount flags exits 0"
+assert_grep '^cpus = 2$' "$(CONFIG)" "a run without mount flags keeps the content that is not the script's"
+assert_not_grep "airlock-claude mounts" "$(CONFIG)" "a run without mount flags removes the block"
+assert_not_grep "mounts\." "$(CONFIG)" "no mount survives a run without mount flags"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+run_script --mount-rw "$CASE_DIR/other"
+run_script
+assert_absent "$(CONFIG)" "a file that held only the block is removed, so it cannot suppress the wizard later"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other" "$(CONFIG)"
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 1 "$RC" "an unreadable airlock.local.toml exits 1"
+assert_grep "could not read airlock.local.toml" "$CASE_DIR/err" "an unreadable airlock.local.toml says so"
+assert_not_grep "LAUNCH:" "$LOG" "an unreadable airlock.local.toml does not launch"
+
+for flags in with-mount without-flags; do
+  new_case; stub_all
+  mkdir -p "$CASE_DIR/other"
+  printf '[vm]\ncpus = 2\n# BEGIN airlock-claude mounts (rewritten on every airlock-claude run)\n[mounts."old"]\n[after]\nkey = 1\n' > "$(CONFIG)"
+  cp "$(CONFIG)" "$CASE_DIR/before"
+  if [ "$flags" = with-mount ]; then run_script --mount-rw "$CASE_DIR/other"; else run_script; fi
+  assert_rc 1 "$RC" "a BEGIN line without its END line exits 1 ($flags)"
+  assert_grep "without its '# END" "$CASE_DIR/err" "a BEGIN line without its END line is named in the message ($flags)"
+  if cmp -s "$(CONFIG)" "$CASE_DIR/before"; then pass "a BEGIN line without its END line leaves the file byte-identical ($flags)"
+  else fail "a BEGIN line without its END line leaves the file byte-identical ($flags)"; fi
+  assert_not_grep "LAUNCH:" "$LOG" "a BEGIN line without its END line does not launch ($flags)"
+done
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+printf '[vm]\ncpus = 2\n\n# BEGIN airlock-claude mounts (rewritten on every airlock-claude run)\n[mounts."old"]\nsource = "/x/old"\n# END airlock-claude mounts\n[after]\nkey = 1\n' > "$(CONFIG)"
+run_script --mount-rw "$CASE_DIR/other"
+assert_grep '^\[after\]$' "$(CONFIG)" "content after the old block is kept"
+assert_grep '^key = 1$' "$(CONFIG)" "keys after the old block are kept"
+assert_not_grep '"old"' "$(CONFIG)" "the old block's mounts are dropped"
+assert_eq "1" "$(grep -c '^# BEGIN airlock-claude mounts' "$(CONFIG)")" "exactly one block remains after a rewrite"
+assert_eq "# END airlock-claude mounts" "$(tail -n 1 "$(CONFIG)")" "the new block is at the end of the file"
+
+new_case; stub_all
+printf '# BEGIN airlock-claude mounts (x)\n[mounts."a"]\n# END airlock-claude mounts\n# BEGIN airlock-claude mounts (x)\n[mounts."b"]\n# END airlock-claude mounts\n' > "$(CONFIG)"
+run_script
+assert_rc 0 "$RC" "a file of two blocks is accepted"
+assert_absent "$(CONFIG)" "both blocks are stripped, leaving nothing, so the file is removed"
+
+new_case; stub_all
+printf '[vm]\ncpus = 2\n\n\n' > "$(CONFIG)"
+cp "$(CONFIG)" "$CASE_DIR/before"
+run_script
+assert_rc 0 "$RC" "a run without flags on a hand-written file exits 0"
+if cmp -s "$(CONFIG)" "$CASE_DIR/before"; then pass "a hand-written file with no block is byte-identical after a run without flags"
+else fail "a hand-written file with no block is byte-identical after a run without flags"; fi
+
+new_case; stub_all
+mkdir "$CASE_DIR/bad"$'\n'"name"
+run_script --mount-rw "$CASE_DIR/bad"$'\n'"name"
+assert_rc 2 "$RC" "a mount path with a newline exits 2"
+assert_grep "control characters" "$CASE_DIR/err" "a mount path with a newline says why"
+assert_absent "$(CONFIG)" "a mount path with a newline writes nothing"
+assert_not_grep "LAUNCH:" "$LOG" "a mount path with a newline does not launch"
+
+section "mounts on a first run"
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+export STUB_NO_SANDBOX=1
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 2 "$RC" "mounts on a project with no sandbox exit 2"
+assert_grep "run once without mounts" "$CASE_DIR/err" "the refusal says the wizard has to create the sandbox first"
+assert_absent "$(CONFIG)" "the refusal writes no file, so the wizard is not suppressed"
+assert_not_grep "LAUNCH:" "$LOG" "the refusal does not launch"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+export STUB_NO_SANDBOX=1
+printf '[packs]\nalpine = { version = "1" }\n' > "$WORK/airlock.toml"
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 0 "$RC" "mounts on a first run are fine when an airlock.toml keeps the wizard away"
+assert_grep '^\[mounts."other"\]$' "$(CONFIG)" "the block is written next to the project's airlock.toml"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+export STUB_NO_SANDBOX=1
+printf '[vm]\ncpus = 2\n' > "$(CONFIG)"
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 0 "$RC" "mounts on a first run are fine when a hand-written airlock.local.toml keeps the wizard away"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+export STUB_NO_SANDBOX=1
+printf '%s\n' '# BEGIN airlock-claude mounts (rewritten on every airlock-claude run)' '[mounts."old"]' \
+  'source = "/old"' 'target = "old"' 'read_only = false' '# END airlock-claude mounts' > "$(CONFIG)"
+run_script --mount-rw "$CASE_DIR/other"
+assert_rc 2 "$RC" "an old block of the script's own does not count as config that keeps the wizard away"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other" "$STUB_BOX"; : > "$STUB_BOX/disk.img"
+run_script -r --mount-rw "$CASE_DIR/other"
+assert_rc 2 "$RC" "-r with mounts exits 2, since the rebuilt sandbox needs the wizard"
+assert_not_grep "^REMOVE:" "$LOG" "-r with mounts is refused before anything is removed"
+assert_exists "$STUB_BOX/disk.img" "the sandbox survives a refused -r"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+run_script --mount-rw "$CASE_DIR/other"
+run_script -r
+assert_grep "^REMOVE: remove --force$" "$LOG" "-r without mounts removes the sandbox"
+assert_absent "$(CONFIG)" "-r without mounts also drops a block-only file, so the wizard runs again"
+assert_grep "^LAUNCH:" "$LOG" "-r without mounts launches"
 
 printf '\n%s\n' "----------------------------------------"
 printf '%d passed, %d failed\n' "$PASSED" "$FAILED"

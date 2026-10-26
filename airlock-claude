@@ -1,21 +1,23 @@
 #!/bin/bash
 
-IMAGE=airlock-claude:latest
-
 usage() {
   cat <<'USAGE'
-Usage: airlock-claude [-M|--no-monitor] [-T|--no-tmux] [--theme <theme>]
+Usage: airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-r|--rebuild]
                       [--mount-rw <dir>] [--mount-ro <dir>]
-                      [-r|--rebuild-image] [-h|--help]
-                      [-- <claude args...>]
-       airlock-claude [-M|--no-monitor] [-T|--no-tmux] [--mount-rw <dir>]
-                      [--mount-ro <dir>] [-r|--rebuild-image]
+                      [-h|--help] [-- <claude args...>]
+       airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-r|--rebuild]
+                      [--mount-rw <dir>] [--mount-ro <dir>]
                       -x|--exec -- <command...>
 
-Runs Claude Code sandboxed in an airlock VM in the current directory,
-building the sandbox image and generating airlock config as needed.
+Runs Claude Code sandboxed in an airlock VM in the current directory, with
+network access denied by default. On a project's first run airlock's
+setup wizard asks which packs or template to use: pick alpine and claude, or a
+template built on them.
 
 The session runs inside tmux, under airlock's monitor TUI, by default.
+Before it starts, tmux is installed into the sandbox if missing, and the
+tmux config, Claude Code's managed settings (bypass permissions) and
+managed CLAUDE.md are written under /etc.
 
 When the session ends, the last lines of its output are printed again —
 the monitor and tmux restore the host screen on exit, taking the session's
@@ -23,38 +25,25 @@ final words with them — and the whole terminal log of the run is kept as
 pty.dump in the sandbox directory (`airlock info` shows it), with the
 previous run's log beside it as pty.dump.previous.
 
-  -M, --no-monitor     Run without the monitor TUI, handing the host terminal
-                       straight to the session.
-  -m, --monitor        Run under the monitor TUI (the default).
-  -T, --no-tmux        Run claude directly instead of inside tmux.
-  -t, --tmux           Run inside tmux (the default).
-  --theme <theme>      Tell claude which colour theme to use: dark, light,
-                       auto, dark-daltonized, light-daltonized, dark-ansi or
-                       light-ansi. The AIRLOCK_CLAUDE_THEME environment
-                       variable sets the same thing; the flag wins. Without
-                       either, the theme is picked on the host — the terminal
-                       is asked for its background colour, then the macOS
-                       appearance and COLORFGBG are consulted — because
-                       claude's own detection can't reach the host terminal
-                       from inside the VM. When nothing answers, claude keeps
-                       whatever theme it already had.
-  --mount-rw <dir>     Mount another host directory into the VM, read-write,
-                       under the project directory as its basename — e.g.
-                       --mount-rw ../other-project appears as ./other-project
-                       in the session. Repeatable. Lets related projects sit
-                       next to this one on the host instead of being copied
-                       into it.
-  --mount-ro <dir>     Like --mount-rw, but read-only: the session can read
-                       and build against the directory but not change it.
-  -x, --exec           Run the command given after -- instead of claude,
-                       in the same VM and, by default, the same tmux and
-                       monitor wrappers. The claude-only flag --theme
-                       cannot be combined with it.
-  -r, --rebuild-image  Rebuild the sandbox image from scratch, ignoring the
-                       layer cache and re-pulling the base image, and drop
-                       the local .airlock directory so airlock converts the
-                       refreshed image instead of its cached VM disk.
-  -h, --help           Show this help.
+  -M, --no-monitor  Run without the monitor TUI, handing the host terminal
+                    straight to the session.
+  -T, --no-tmux     Run claude directly instead of inside tmux.
+  --mount-rw <dir>  Mount another host directory into the VM, read-write,
+                    under the project directory as its basename: e.g.
+                    --mount-rw ../other-project appears as ./other-project
+                    in the session. Repeatable. The mounts are kept in a
+                    marked block of airlock.local.toml, rewritten on every
+                    run, and need a sandbox to exist already (run once
+                    without mounts first, so the setup wizard can run).
+  --mount-ro <dir>  Like --mount-rw, but read-only.
+  -x, --exec        Run the command given after -- instead of claude, in
+                    the same VM and, by default, the same tmux and monitor
+                    wrappers.
+  -r, --rebuild     Remove the project's sandbox (`airlock remove`) before
+                    starting, so airlock makes a fresh one and the setup
+                    wizard runs again. Anything installed inside the VM is
+                    lost; the persisted Claude settings and login are not.
+  -h, --help        Show this help.
 
 Arguments after -- are passed to claude verbatim:
 
@@ -69,23 +58,12 @@ USAGE
 }
 
 parse_args() {
-  REBUILD= MONITOR=1 USE_TMUX=1 THEME= EXEC= SHOW_USAGE= CLAUDE_ARGS=()
-  MOUNTS_RW=() MOUNTS_RO=()
+  MONITOR=1 USE_TMUX=1 EXEC= REBUILD= SHOW_USAGE= CLAUDE_ARGS=() MOUNTS_RW=() MOUNTS_RO=()
   while [[ $# -gt 0 ]]; do
     case $1 in
       --) shift; CLAUDE_ARGS=("$@"); return 0 ;;
-      -m|--monitor) MONITOR=1 ;;
       -M|--no-monitor) MONITOR= ;;
-      -t|--tmux) USE_TMUX=1 ;;
       -T|--no-tmux) USE_TMUX= ;;
-      --theme)
-        if [[ $# -lt 2 ]]; then
-          echo "airlock-claude: --theme needs a value" >&2
-          return 2
-        fi
-        THEME=$2
-        shift ;;
-      --theme=*) THEME=${1#--theme=} ;;
       --mount-rw|--mount-ro)
         if [[ $# -lt 2 ]]; then
           echo "airlock-claude: $1 needs a directory" >&2
@@ -96,7 +74,7 @@ parse_args() {
       --mount-rw=*) MOUNTS_RW+=("${1#--mount-rw=}") ;;
       --mount-ro=*) MOUNTS_RO+=("${1#--mount-ro=}") ;;
       -x|--exec) EXEC=1 ;;
-      -r|--rebuild-image) REBUILD=1 ;;
+      -r|--rebuild) REBUILD=1 ;;
       -h|--help) SHOW_USAGE=1; break ;;
       *)
         echo "airlock-claude: unknown option: $1" >&2
@@ -108,107 +86,19 @@ parse_args() {
 }
 
 validate_exec_usage() {
-  local exec_given=$1 flag_theme=$2 command_word_count=$3
+  local exec_given=$1 command_word_count=$2
   [[ -n $exec_given ]] || return 0
   if (( command_word_count == 0 )); then
     echo "airlock-claude: --exec needs a command after --" >&2
-    return 2
-  fi
-  if [[ -n $flag_theme ]]; then
-    echo "airlock-claude: --theme configures claude, which --exec replaces" >&2
     return 2
   fi
 }
 
 require_airlock() {
   if ! command -v airlock >/dev/null 2>&1; then
-    echo "airlock not found in PATH" >&2
+    echo "airlock-claude: airlock not found in PATH" >&2
     return 1
   fi
-}
-
-validate_theme() {
-  local theme=$1
-  case $theme in
-    dark|light|auto|dark-daltonized|light-daltonized|dark-ansi|light-ansi)
-      return 0 ;;
-    *)
-      echo "airlock-claude: unknown theme: $theme" >&2
-      echo "Themes: dark light auto dark-daltonized light-daltonized dark-ansi light-ansi" >&2
-      return 2 ;;
-  esac
-}
-
-channel_as_8_bit() {
-  local hex=${1%%[!0-9a-fA-F]*}
-  if [[ -z $hex || ${#hex} -gt 4 ]]; then
-    return 1
-  fi
-  if [[ ${#hex} -eq 1 ]]; then
-    hex=$hex$hex
-  fi
-  printf '%d\n' "$((16#${hex:0:2}))"
-}
-
-theme_from_terminal_background() {
-  [[ -t 0 && -t 2 ]] || return 1
-  local saved_tty_state reply= channels r g b
-  saved_tty_state=$(stty -g </dev/tty 2>/dev/null) || return 1
-  stty -icanon -echo min 0 time 0 </dev/tty 2>/dev/null || return 1
-  printf '\033]11;?\033\\' >/dev/tty
-  IFS= read -rs -t 1 -d '\' reply </dev/tty
-  stty "$saved_tty_state" </dev/tty 2>/dev/null
-  case $reply in
-    *rgba:*) channels=${reply#*rgba:} ;;
-    *rgb:*) channels=${reply#*rgb:} ;;
-    *) return 1 ;;
-  esac
-  IFS=/ read -r r g b _ <<<"$channels"
-  r=$(channel_as_8_bit "$r") && g=$(channel_as_8_bit "$g") \
-    && b=$(channel_as_8_bit "$b") || return 1
-  if (( 2126 * r + 7152 * g + 722 * b >= 1280000 )); then
-    printf 'light\n'
-  else
-    printf 'dark\n'
-  fi
-}
-
-theme_from_macos_appearance() {
-  command -v defaults >/dev/null 2>&1 || return 1
-  local style
-  style=$(defaults read -g AppleInterfaceStyle 2>&1)
-  case $style in
-    Dark) printf 'dark\n' ;;
-    *"does not exist"*) printf 'light\n' ;;
-    *) return 1 ;;
-  esac
-}
-
-theme_from_colorfgbg() {
-  local colorfgbg=$1
-  local background=${colorfgbg##*;}
-  if [[ $background == "$colorfgbg" || -z $background || $background == *[!0-9]* ]]; then
-    return 1
-  fi
-  if (( background == 7 || background >= 9 )); then
-    printf 'light\n'
-  else
-    printf 'dark\n'
-  fi
-}
-
-resolve_theme() {
-  local flag_theme=$1 env_theme=$2 colorfgbg=$3
-  local requested=${flag_theme:-$env_theme}
-  if [[ -n $requested ]]; then
-    validate_theme "$requested" || return 2
-    printf '%s\n' "$requested"
-    return 0
-  fi
-  theme_from_terminal_background && return 0
-  theme_from_macos_appearance && return 0
-  theme_from_colorfgbg "$colorfgbg" && return 0
-  return 0
 }
 
 resolve_extra_mount() {
@@ -226,6 +116,10 @@ resolve_extra_mount() {
     echo "airlock-claude: $flag: cannot resolve: $dir" >&2
     return 2
   }
+  if [[ $source == *[[:cntrl:]]* ]]; then
+    echo "airlock-claude: $flag: control characters in the path are not supported: $dir" >&2
+    return 2
+  fi
   if [[ $source == "$PWD" ]]; then
     echo "airlock-claude: $flag: $dir is the project directory, which is always mounted" >&2
     return 2
@@ -257,6 +151,59 @@ resolve_extra_mounts() {
   done
 }
 
+without_mounts_block() {
+  local file=$1
+  local line inside=
+  [[ -f $file ]] || return 1
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ -n $inside ]]; then
+      if [[ $line == "# END airlock-claude mounts" ]]; then inside=; fi
+    elif [[ $line == "# BEGIN airlock-claude mounts"* ]]; then
+      inside=1
+    else
+      printf '%s\n' "$line"
+    fi
+  done < "$file" || return 1
+  [[ -z $inside ]] || return 2
+}
+
+project_config_present() {
+  local ext
+  for ext in toml json yaml yml; do
+    [[ -e airlock.$ext ]] && { printf '1\n'; return 0; }
+  done
+  for ext in json yaml yml; do
+    [[ -e airlock.local.$ext ]] && { printf '1\n'; return 0; }
+  done
+  if [[ -f airlock.local.toml ]] && [[ -n $(without_mounts_block airlock.local.toml 2>/dev/null | tr -d '[:space:]') ]]; then
+    printf '1\n'
+  fi
+  return 0
+}
+
+sandbox_dir() {
+  airlock info --json 2>/dev/null | sed -n 's/^ *"dir": *"\(.*\)",\{0,1\}$/\1/p'
+}
+
+refuse_mounts_on_first_run() {
+  local mount_count=$1 rebuild=$2 sandbox=$3 has_config=$4
+  (( mount_count > 0 )) || return 0
+  [[ -z $has_config ]] || return 0
+  if [[ -n $rebuild || -z $sandbox ]]; then
+    echo "airlock-claude: --mount-rw/--mount-ro need a sandbox to exist already: run once without mounts, so airlock's setup wizard can create it" >&2
+    return 2
+  fi
+}
+
+remove_sandbox_on_rebuild() {
+  local rebuild=$1
+  [[ -n $rebuild ]] || return 0
+  if ! airlock remove --force >&2; then
+    echo "airlock-claude: airlock remove failed, not launching on the old sandbox" >&2
+    return 1
+  fi
+}
+
 toml_escaped() {
   local s=$1
   s=${s//\\/\\\\}
@@ -264,267 +211,163 @@ toml_escaped() {
   printf '%s\n' "$s"
 }
 
-extra_mounts_toml() {
+extra_mounts_block() {
+  (( ${#MOUNT_SOURCES[@]} > 0 )) || return 0
   local i source target
+  printf '# BEGIN airlock-claude mounts (rewritten on every airlock-claude run)\n'
   for ((i = 0; i < ${#MOUNT_SOURCES[@]}; i++)); do
     source=$(toml_escaped "${MOUNT_SOURCES[i]}")
     target=$(toml_escaped "${MOUNT_TARGETS[i]}")
-    printf '\n[mounts."%s"]\nsource = "%s"\ntarget = "%s"\nread_only = %s\n' \
+    printf '[mounts."%s"]\nsource = "%s"\ntarget = "%s"\nread_only = %s\n' \
       "$target" "$source" "$target" "${MOUNT_READ_ONLY[i]}"
   done
+  printf '# END airlock-claude mounts\n'
 }
 
-pick_container_engine() {
-  if command -v docker >/dev/null 2>&1; then
-    printf '%s\n' docker
-  elif command -v podman >/dev/null 2>&1; then
-    printf '%s\n' podman
-  else
-    echo "Neither docker nor podman found in PATH" >&2
-    return 1
+write_mounts_block() {
+  local block=$1
+  local kept= content status
+  if [[ -e airlock.local.toml ]]; then
+    kept=$(without_mounts_block airlock.local.toml 2>/dev/null); status=$?
+    if (( status == 2 )); then
+      echo "airlock-claude: airlock.local.toml has a '# BEGIN airlock-claude mounts' line without its '# END airlock-claude mounts' line; fix or remove the block by hand" >&2
+      return 1
+    elif (( status != 0 )); then
+      echo "airlock-claude: could not read airlock.local.toml in $PWD" >&2
+      return 1
+    fi
+    if [[ -z $block && $kept == "$(cat airlock.local.toml)" ]]; then
+      return 0
+    fi
   fi
-}
-
-build_image_if_needed() {
-  local engine=$1 rebuild=$2
-  if [[ -z $rebuild ]] && "$engine" image inspect "$IMAGE" >/dev/null 2>&1; then
+  content=$kept
+  [[ -n $block ]] && content=${content:+$content$'\n\n'}$block
+  if [[ -z $(printf '%s' "$content" | tr -d '[:space:]') ]]; then
+    [[ -e airlock.local.toml ]] && rm -f airlock.local.toml
     return 0
   fi
-
-  echo "Building $IMAGE with $engine ..." >&2
-  local build_flags=()
-  [[ -n $rebuild ]] && build_flags=(--no-cache --pull)
-  "$engine" build -t "$IMAGE" "${build_flags[@]}" - <<'DOCKERFILE' || return 1
-FROM python:3.14-slim
-RUN DEBIAN_FRONTEND=noninteractive apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates git curl ripgrep jq less procps unzip openssh-client \
-      tmux locales ncurses-term vim \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall ncurses-base \
- && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen \
- && locale-gen \
- && rm -rf /var/lib/apt/lists/*
-
-ENV LANG=en_US.UTF-8
-
-ENV NVM_DIR=/opt/nvm
-ENV PATH="$PATH:/opt/nvm/current/bin"
-RUN mkdir -p "$NVM_DIR" \
- && PROFILE=/dev/null bash -c 'curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash' \
- && bash -c '. "$NVM_DIR/nvm.sh" --no-use && nvm install --lts && nvm alias default "lts/*" \
-             && ln -sfn "$NVM_DIR/versions/node/$(nvm version default)" "$NVM_DIR/current"' \
- && printf '%s\n' \
-      'case ":$PATH:" in' \
-      '  *":/opt/nvm/current/bin:"*) ;;' \
-      '  *) PATH="$PATH:/opt/nvm/current/bin" ;;' \
-      'esac' \
-      'export PATH' \
-      'if [ -n "$BASH_VERSION" ] && [ -s "${NVM_DIR:-/opt/nvm}/nvm.sh" ]; then' \
-      '  . "${NVM_DIR:-/opt/nvm}/nvm.sh" --no-use' \
-      'fi' \
-      > /etc/profile.d/nvm.sh \
- && chmod -R a+rwX "$NVM_DIR"
-
-ENV CLAUDE_INSTALL_HOME=/opt/claude
-ENV PATH="$PATH:/opt/claude/.local/bin"
-RUN mkdir -p "$CLAUDE_INSTALL_HOME" \
- && HOME="$CLAUDE_INSTALL_HOME" sh -c 'curl -fsSL https://claude.ai/install.sh | bash' \
- && chmod -R a+rwX "$CLAUDE_INSTALL_HOME"
-
-RUN printf '%s\n' \
-      '#!/bin/sh' \
-      'LAUNCHER="${CLAUDE_INSTALL_HOME:-/opt/claude}/.local/bin/claude"' \
-      'UPDATED_THIS_BOOT=/tmp/.airlock-claude-updated-this-boot' \
-      'if [ -z "$AIRLOCK_CLAUDE_SKIP_UPDATE" ] && [ ! -e "$UPDATED_THIS_BOOT" ]; then' \
-      '  : > "$UPDATED_THIS_BOOT" 2>/dev/null' \
-      '  HOME="${CLAUDE_INSTALL_HOME:-/opt/claude}" "$LAUNCHER" update >&2 ||' \
-      '    echo "airlock-claude: update failed, using the version from the image" >&2' \
-      'fi' \
-      'exec "$LAUNCHER" "$@"' \
-      > /usr/local/bin/claude \
- && chmod +x /usr/local/bin/claude
-
-RUN mkdir -p /etc/claude-code \
- && printf '%s\n' \
-      '{' \
-      '  "permissions": { "defaultMode": "bypassPermissions" },' \
-      '  "skipDangerousModePermissionPrompt": true' \
-      '}' \
-      > /etc/claude-code/managed-settings.json
-
-RUN printf '%s\n' \
-      '# Sandbox notes (airlock-claude)' \
-      '' \
-      'This session runs inside an airlock VM. Outbound network access is denied' \
-      'except for allowlisted hosts, and the HTTPS traffic that is allowed goes' \
-      'through the airlock TLS proxy, which re-signs every host with its own' \
-      '"airlock CA". The system trust store already includes that CA, so curl,' \
-      'git, pip and Node work unchanged.' \
-      '' \
-      'An HTTP request the policy denies is answered by the proxy itself with' \
-      '403 Forbidden and the body "denied by network policy" (one line). That' \
-      'response means the airlock policy blocked the request, not that the' \
-      'remote server refused it.' \
-      '' \
-      '## Blocked traffic can be allowed interactively' \
-      '' \
-      'The user can usually enable traffic that does not match the allow/deny' \
-      'rules of the airlock policy, temporarily and interactively, from outside' \
-      'the session. If network access beyond the allowlist would be important' \
-      'for the task, ask the user to allow the traffic instead of working' \
-      'around the block. When they do, remind them to revert the airlock' \
-      'network policy once the part of the work that needed the extra access' \
-      'is done.' \
-      '' \
-      '## Python HTTPS fails with "Missing Authority Key Identifier"' \
-      '' \
-      'Every Python HTTPS client fails certificate verification here: urllib,' \
-      'http.client, urllib3, requests, httpx and aiohttp all raise' \
-      'CERTIFICATE_VERIFY_FAILED with "Missing Authority Key Identifier" (requests' \
-      'and httpx may say "unable to get local issuer certificate" first). Python' \
-      '3.13+ turns on VERIFY_X509_STRICT by default, and the per-host certificates' \
-      'the proxy issues carry no Authority Key Identifier extension, so strict' \
-      'checking rejects them. SSL_CERT_FILE and REQUESTS_CA_BUNDLE do not help.' \
-      '' \
-      'Fix: build one SSL context with strict checking off and pass it explicitly.' \
-      'Verification itself stays on; do not use verify=False or CERT_NONE.' \
-      '' \
-      '    import ssl' \
-      '    ctx = ssl.create_default_context()' \
-      '    ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT' \
-      '' \
-      '    urllib.request.urlopen(url, context=ctx)' \
-      '    http.client.HTTPSConnection(host, context=ctx)' \
-      '    urllib3.PoolManager(ssl_context=ctx)' \
-      '    httpx.get(url, verify=ctx)            # or httpx.Client(verify=ctx)' \
-      '    session.get(url, ssl=ctx)             # aiohttp' \
-      '' \
-      '    class Adapter(requests.adapters.HTTPAdapter):    # requests' \
-      '        def init_poolmanager(self, *args, **kwargs):' \
-      '            kwargs["ssl_context"] = ctx' \
-      '            return super().init_poolmanager(*args, **kwargs)' \
-      '    s = requests.Session(); s.mount("https://", Adapter())' \
-      '' \
-      'For a one-off download, curl works without any of this.' \
-      '' \
-      '## Virtualenvs you find here belong to the host' \
-      '' \
-      'The working directory is shared with the host, so any .venv, venv or other' \
-      'virtualenv already in it was almost certainly created on the host, with a' \
-      'different Python at a different path. Its interpreter symlinks, pyvenv.cfg' \
-      'and compiled wheels will not match this sandbox. Never activate, reuse,' \
-      'delete or overwrite a virtualenv you did not create in this session. Make' \
-      'your own under a different name, for example python3 -m venv .venv-airlock,' \
-      'and leave the existing one alone.' \
-      '' \
-      '## Node.js' \
-      '' \
-      'The Node.js LTS current at image build time is on PATH through' \
-      '/opt/nvm/current/bin, so node, npm and npx work in every shell with no' \
-      'nvm use needed. nvm itself is a shell function: login shells have it, and' \
-      'a non-login shell (this Bash tool included) must source /opt/nvm/nvm.sh' \
-      'first to run nvm install or nvm use.' \
-      '' \
-      '## Describe the present only' \
-      '' \
-      'When you write or change comments or documentation, describe how things' \
-      'are now. Never add notes about how something used to work, what an' \
-      'approach replaced, or why an old way is gone. That history belongs in' \
-      'the commit message, and nowhere else.' \
-      > /etc/claude-code/CLAUDE.md
-
-RUN printf '%s\n' \
-      'set -g mouse on' \
-      'set -g set-clipboard on' \
-      'set -as terminal-features ",*:clipboard"' \
-      'set -g default-terminal "tmux-256color"' \
-      > /etc/tmux.conf
-
-RUN printf '%s\n' \
-      '' \
-      '# airlock-claude: ls conveniences for interactive shells' \
-      'alias ls="ls --color=auto"' \
-      'alias l="ls -CF"' \
-      'alias la="ls -A"' \
-      'alias ll="ls -lh"' \
-      'alias lll="ls -lhA"' \
-      >> /etc/bash.bashrc
-DOCKERFILE
-}
-
-remove_sandbox_on_rebuild() {
-  local rebuild=$1
-  if [[ -n $rebuild ]]; then
-    airlock remove --force >&2 || return 1
-    rm -rf .airlock
-  fi
-}
-
-template_escaped() {
-  local s=$1
-  s=${s//\\/\\\\}
-  s=${s//\$/\\\$}
-  printf '%s\n' "$s"
-}
-
-env_line() {
-  local name=$1 value=$2
-  [[ -n $value ]] || return 0
-  printf '%s = "%s"\n' "$name" "$(toml_escaped "$(template_escaped "$value")")"
-}
-
-git_identity_env() {
-  local author_name=$1 author_email=$2 committer_name=$3 committer_email=$4
-  local user_name user_email
-  user_name=$(git config --get user.name 2>/dev/null)
-  user_email=$(git config --get user.email 2>/dev/null)
-  env_line GIT_AUTHOR_NAME "${author_name:-$user_name}"
-  env_line GIT_AUTHOR_EMAIL "${author_email:-$user_email}"
-  env_line GIT_COMMITTER_NAME "${committer_name:-$user_name}"
-  env_line GIT_COMMITTER_EMAIL "${committer_email:-$user_email}"
-}
-
-generate_airlock_config() {
-  local engine=$1 skip_update=$2 git_identity=$3 extra_mounts=$4
-  local skip_update_line=
-  if [[ -n $skip_update ]]; then
-    skip_update_line='AIRLOCK_CLAUDE_SKIP_UPDATE = "1"'
-  fi
-
-  if ! cat > airlock.local.toml <<EOF
-presets = ["claude-code", "debian", "python"]
-
-[network]
-policy = "deny-by-default"
-
-[network.services]
-anthropic = true
-
-[vm.image]
-name = "$IMAGE"
-resolution = "$engine"
-
-[env]
-DISABLE_AUTOUPDATER = "1"
-CLAUDE_CODE_OAUTH_TOKEN = { optional = true }
-$skip_update_line
-$git_identity
-$extra_mounts
-EOF
-  then
+  printf '%s\n' "$content" > airlock.local.toml || {
     echo "airlock-claude: could not write airlock.local.toml in $PWD" >&2
     return 1
-  fi
-}
-
-sandbox_dir() {
-  airlock info --json 2>/dev/null | sed -n 's/^ *"dir": *"\(.*\)",\{0,1\}$/\1/p'
+  }
 }
 
 keep_previous_pty_dump() {
   local dump=$1
   if [[ -s $dump ]]; then
     mv -f "$dump" "$dump.previous"
+  fi
+}
+
+session_script() {
+  local use_tmux=$1
+  if [[ -n $use_tmux ]]; then
+    cat <<'TMUX_INSTALL'
+command -v tmux >/dev/null 2>&1 || apk add --quiet tmux || exit 1
+TMUX_INSTALL
+  fi
+  cat <<'PRELUDE'
+cat > /etc/tmux.conf <<'TMUX_CONF'
+set -g mouse on
+set -g set-clipboard on
+set -as terminal-features ",*:clipboard"
+set -g default-terminal "tmux-256color"
+TMUX_CONF
+mkdir -p /etc/claude-code
+cat > /etc/claude-code/managed-settings.json <<'SETTINGS'
+{
+  "permissions": { "defaultMode": "bypassPermissions" },
+  "skipDangerousModePermissionPrompt": true
+}
+SETTINGS
+cat > /etc/claude-code/CLAUDE.md <<'CLAUDE_MD'
+# Sandbox notes (airlock-claude)
+
+This session runs inside an airlock VM. Outbound network access is denied
+except for allowlisted hosts, and the HTTPS traffic that is allowed goes
+through the airlock TLS proxy, which re-signs every host with its own
+"airlock CA". The system trust store already includes that CA, so curl,
+git and pip work unchanged.
+
+An HTTP request the policy denies is answered by the proxy itself with
+403 Forbidden and the body "denied by network policy" (one line). That
+response means the airlock policy blocked the request, not that the
+remote server refused it.
+
+## Blocked traffic can be allowed interactively
+
+The user can usually enable traffic that does not match the allow/deny
+rules of the airlock policy, temporarily and interactively, from outside
+the session. If network access beyond the allowlist would be important
+for the task, ask the user to allow the traffic instead of working
+around the block. When they do, remind them to revert the airlock
+network policy once the part of the work that needed the extra access
+is done.
+
+## Alpine Linux
+
+The sandbox is Alpine Linux on musl, not glibc. Install packages with
+apk add; the Alpine package mirrors are allowed under the network policy.
+A prebuilt binary built for glibc does not run here: look for a musl
+build or for the apk package instead.
+
+## Python HTTPS fails with "Missing Authority Key Identifier"
+
+Every Python HTTPS client fails certificate verification here: urllib,
+http.client, urllib3, requests, httpx and aiohttp all raise
+CERTIFICATE_VERIFY_FAILED with "Missing Authority Key Identifier" (requests
+and httpx may say "unable to get local issuer certificate" first). Python
+3.13+ turns on VERIFY_X509_STRICT by default, and the per-host certificates
+the proxy issues carry no Authority Key Identifier extension, so strict
+checking rejects them. SSL_CERT_FILE and REQUESTS_CA_BUNDLE do not help.
+
+Fix: build one SSL context with strict checking off and pass it explicitly.
+Verification itself stays on; do not use verify=False or CERT_NONE.
+
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+
+    urllib.request.urlopen(url, context=ctx)
+    http.client.HTTPSConnection(host, context=ctx)
+    urllib3.PoolManager(ssl_context=ctx)
+    httpx.get(url, verify=ctx)            # or httpx.Client(verify=ctx)
+    session.get(url, ssl=ctx)             # aiohttp
+
+    class Adapter(requests.adapters.HTTPAdapter):    # requests
+        def init_poolmanager(self, *args, **kwargs):
+            kwargs["ssl_context"] = ctx
+            return super().init_poolmanager(*args, **kwargs)
+    s = requests.Session(); s.mount("https://", Adapter())
+
+For a one-off download, curl works without any of this.
+
+## Virtualenvs you find here belong to the host
+
+The working directory is shared with the host, so any .venv, venv or other
+virtualenv already in it was almost certainly created on the host, with a
+different Python at a different path. Its interpreter symlinks, pyvenv.cfg
+and compiled wheels will not match this sandbox. Never activate, reuse,
+delete or overwrite a virtualenv you did not create in this session. Make
+your own under a different name, for example python3 -m venv .venv-airlock,
+and leave the existing one alone.
+
+## Describe the present only
+
+When you write or change comments or documentation, describe how things
+are now. Never add notes about how something used to work, what an
+approach replaced, or why an old way is gone. That history belongs in
+the commit message, and nowhere else.
+CLAUDE_MD
+PRELUDE
+  if [[ -n $use_tmux ]]; then
+    cat <<'HANDOFF'
+exec tmux -u new-session -A -s claude "$(printf '%q ' "$@")"
+HANDOFF
+  else
+    cat <<'HANDOFF'
+exec "$@"
+HANDOFF
   fi
 }
 
@@ -555,36 +398,28 @@ print_pty_dump_tail() {
 parse_args "$@" || exit $?
 [[ -n $SHOW_USAGE ]] && { usage; exit 0; }
 
-validate_exec_usage "$EXEC" "$THEME" "${#CLAUDE_ARGS[@]}" || exit $?
+validate_exec_usage "$EXEC" "${#CLAUDE_ARGS[@]}" || exit $?
 
 require_airlock || exit 1
 
-if [[ -z $EXEC ]]; then
-  THEME=$(resolve_theme "$THEME" "${AIRLOCK_CLAUDE_THEME:-}" "${COLORFGBG:-}") || exit 2
-fi
-
 resolve_extra_mounts || exit $?
+refuse_mounts_on_first_run "${#MOUNT_SOURCES[@]}" "$REBUILD" "$(sandbox_dir)" "$(project_config_present)" || exit $?
 
-CONTAINER_ENGINE=$(pick_container_engine) || exit 1
-
-build_image_if_needed "$CONTAINER_ENGINE" "$REBUILD" || exit 1
 remove_sandbox_on_rebuild "$REBUILD" || exit 1
-generate_airlock_config "$CONTAINER_ENGINE" "${AIRLOCK_CLAUDE_SKIP_UPDATE:-}" \
-  "$(git_identity_env "${GIT_AUTHOR_NAME:-}" "${GIT_AUTHOR_EMAIL:-}" "${GIT_COMMITTER_NAME:-}" "${GIT_COMMITTER_EMAIL:-}")" \
-  "$(extra_mounts_toml)" || exit 1
+
+write_mounts_block "$(extra_mounts_block)" || exit 1
 
 SANDBOX_DIR=$(sandbox_dir)
 [[ -n $SANDBOX_DIR ]] && keep_previous_pty_dump "$SANDBOX_DIR/pty.dump"
 
+SESSION_SCRIPT=$(session_script "$USE_TMUX")
 if [[ -n $EXEC ]]; then
   SESSION_COMMAND=("${CLAUDE_ARGS[@]}")
 else
-  SESSION_COMMAND=(claude)
-  [[ -n $THEME ]] && SESSION_COMMAND+=(--settings "{\"theme\":\"$THEME\"}")
-  SESSION_COMMAND+=("${CLAUDE_ARGS[@]}")
+  SESSION_COMMAND=(claude "${CLAUDE_ARGS[@]}")
 fi
 
-AIRLOCK_PTY_DUMP=1 airlock start ${MONITOR:+--monitor} -- ${USE_TMUX:+tmux -u new-session -A -s claude} "${SESSION_COMMAND[@]}"
+AIRLOCK_PTY_DUMP=1 airlock start ${MONITOR:+--monitor} --network deny-by-default -- bash -c "$SESSION_SCRIPT" airlock-claude "${SESSION_COMMAND[@]}"
 AIRLOCK_EXIT=$?
 
 SANDBOX_DIR=$(sandbox_dir)
