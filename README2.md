@@ -54,6 +54,9 @@ airlock-claude2 -x -- bash               # a sandboxed shell, no claude
 - `-T`, `--no-tmux` — run `claude` directly instead of inside tmux.
 - `-M`, `--no-monitor` — skip `airlock`'s monitor TUI, which shows the
   network policy at work.
+- `--mount-rw <dir>`, `--mount-ro <dir>` — bring other host directories
+  into the sandbox, read-write or read-only (repeatable; see **Mounts**
+  below).
 - `-x`, `--exec` — run the command after `--` in place of `claude`.
 - `-r`, `--rebuild` — remove the project's sandbox (`airlock remove`) and
   start again, so airlock makes a fresh one and the wizard runs again.
@@ -87,6 +90,24 @@ That overrides the policy in your `airlock.toml` for the run; the rules in
 it still apply. Allow more by adding rules there, or temporarily from the
 monitor.
 
+**Mounts.** Each `--mount-rw`/`--mount-ro` directory appears in the VM
+under the project directory, named after its basename (two mounts can't
+share one). The mounts are written as one marked block in the project's
+`airlock.local.toml` — created if missing, the block replaced on every
+run and removed on a run without mount flags, anything else in the file
+left alone — so add `airlock.local.toml` to the project's `.gitignore`.
+The block is bounded by `# BEGIN airlock-claude2 mounts` and
+`# END airlock-claude2 mounts` lines; don't edit inside it, and keep both
+lines, since a block missing its END line stops the script.
+A changed mount set is a configuration change: `airlock` asks about it
+once at start; accept it. Without a terminal that question aborts, so
+change mounts in an interactive run first. Mounts need a sandbox to
+exist already: on a project's first run they are refused, because the
+file would keep the setup wizard from appearing; run once without them.
+The mount point `airlock` creates in the project directory remains,
+empty, after the session, and a same-named project directory is
+shadowed for the session, untouched underneath.
+
 **Session log.** Every run records the session's raw terminal stream to
 `pty.dump` in the sandbox directory (`airlock info` shows it; one previous
 run is kept as `pty.dump.previous`), and when `airlock` exits the last
@@ -102,9 +123,9 @@ session the per-client workaround, how to recognise a network-policy
 denial, that packages come from `apk`, and to leave host-made virtualenvs
 alone.
 
-The script writes no config file. The wizard's answers live in the
-sandbox directory, and `airlock remove` deletes them with it; a project's
-own `airlock.toml` applies as usual.
+Apart from the mounts block, the script writes no config. The wizard's
+answers live in the sandbox directory, and `airlock remove` deletes them
+with it; a project's own `airlock.toml` applies as usual.
 
 For how each step works and why it's shaped the way it is, see
 [AGENTS2.md](AGENTS2.md).

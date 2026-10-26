@@ -7,8 +7,9 @@ Guidance for coding agents working on `airlock-claude2` and
 
 A single-file launcher, `airlock-claude2`, that runs Claude Code sandboxed
 in an `airlock` VM in any directory, built on airlock's packs and
-templates. It builds nothing and writes no config: airlock's setup wizard
-picks the packs (or a template) on a project's first start, the script
+templates. It builds nothing and writes no config but the mounts block:
+airlock's setup wizard picks the packs (or a template) on a project's
+first start, the script
 imposes the deny-by-default policy on the launch line, and a short bash
 prelude prepares the sandbox before every session. The shipped artifact is
 that one script. `test-airlock-claude2` is its suite.
@@ -27,11 +28,18 @@ order at the bottom, so the call sequence reads as a summary and a
 data-flow diagram:
 
 ```
-parse_args "$@"                      sets MONITOR, USE_TMUX, EXEC, REBUILD, SHOW_USAGE, CLAUDE_ARGS
+parse_args "$@"                      sets MONITOR, USE_TMUX, EXEC, REBUILD, SHOW_USAGE, CLAUDE_ARGS, MOUNTS_RW, MOUNTS_RO
 validate_exec_usage <exec> <count>   -x needs a command after --
 require_airlock
-remove_sandbox_on_rebuild <rebuild>  `airlock remove --force`
+resolve_extra_mounts                 sets MOUNT_SOURCES, MOUNT_TARGETS, MOUNT_READ_ONLY (the array exemption)
+without_mounts_block <file>          -> the file minus the block (1: unreadable, 2: no END line)
+project_config_present               -> 1 if the project has config the wizard would respect, or nothing
 sandbox_dir                          -> the sandbox directory `airlock info` reports, or nothing
+refuse_mounts_on_first_run <count> <rebuild> <sandbox_dir> <has_config>
+remove_sandbox_on_rebuild <rebuild>  `airlock remove --force`
+extra_mounts_block                   -> the marked [mounts] block, or nothing (reads the arrays)
+write_mounts_block <block>           rewrites the block in airlock.local.toml, or removes the file
+sandbox_dir                          again, for the rotation
 keep_previous_pty_dump <dump>        sets last run's log aside as <dump>.previous
 session_script <use_tmux>            -> the bash script that runs in the sandbox
     (the airlock start line — the handoff)
@@ -46,6 +54,9 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   directly.** Its output includes `CLAUDE_ARGS`, an arbitrary-argument
   array, which can't ride through stdout. It initializes every global it
   owns on its first line, so the defaults live in the function.
+  `resolve_extra_mounts` and `extra_mounts_block` share the exemption for
+  the same reason: the resolved mounts are three parallel arrays, set by
+  the one and read by the other.
 - **Failure is a nonzero `return` with a message on stderr; only the main
   sequence calls `exit`.** A function run inside `$( )` is a subshell,
   where `exit` would end only the subshell.
@@ -64,7 +75,7 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
 
 ## Why each step is the way it is
 
-- **No config file is written, and that is what makes templates work.**
+- **The script writes no config except the mounts block, and that is what makes templates work.**
   A template can only be chosen in airlock's interactive setup wizard
   (`airlock start` has no `--template` flag), and the wizard runs only
   when the project has no config at all — no `airlock.toml`, no
@@ -86,6 +97,38 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   the run: launching on the old sandbox would silently not be a rebuild.
   There is no `rm -rf .airlock`: a current airlock keeps nothing in the
   project.
+- **The mounts are one marked block of `airlock.local.toml`, rewritten on
+  every run.** `airlock start` has no mount flag, so a config file is the
+  only way in, and `airlock.local.toml` is the one airlock reads but a
+  project doesn't commit. The block is bounded by `# BEGIN airlock-claude2
+  mounts` and `# END airlock-claude2 mounts` so the script can replace
+  exactly its own lines and leave a hand-written file's other content
+  alone; the BEGIN line says the block is rewritten, so a user editing the
+  file knows not to edit inside it. A run without mount flags removes the
+  block, and a file left holding only whitespace is removed with it —
+  otherwise a leftover file would suppress the wizard after `-r`. That
+  rule applies after a block was stripped: a whitespace-only file the
+  script did not write is kept, and a run without mount flags leaves a
+  file that holds no block byte-identical, so a hand-written
+  `airlock.local.toml` is never rewritten just because the script ran. A
+  `# BEGIN` line without its `# END` line is refused with a message and
+  exit 1 rather than stripped to the end of the file; the reader
+  (`without_mounts_block`) is pure bash and reports status 1 for
+  unreadable, 2 for unterminated. Under `-r` that refusal happens after
+  `airlock remove`, so a `-r` on such a file removes the sandbox and then
+  stops before the launch. Any other read or write failure also aborts
+  before the launch, since airlock would start on the previous file and
+  silently not have the mounts. `resolve_extra_mount` rejects a mount path
+  containing control characters (exit 2), because a TOML basic string
+  can't carry a raw newline and `toml_escaped` covers only `\` and `"`.
+- **`refuse_mounts_on_first_run` runs before `remove_sandbox_on_rebuild`.**
+  A file in the project keeps the wizard from running, so mounts can't be
+  combined with the start that creates the sandbox: no sandbox yet, or
+  `-r`, and no project config of the user's own (`airlock.*`, a non-TOML
+  `airlock.local.*`, or an `airlock.local.toml` with content outside the
+  block — a leftover block of the script's own doesn't count). Checking
+  before the removal is what keeps `-r --mount-rw x` from destroying the
+  sandbox and then failing.
 - **`sandbox_dir` parses `airlock info --json` with `sed`, not `jq`**,
   because the host isn't guaranteed to have `jq`, and the pretty-printed
   JSON puts `"dir"` on a line of its own. It is called twice: before the
@@ -168,6 +211,14 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
 
 ## Non-obvious behavior
 
+- **A changed mount set is a config change.** `airlock start` compares
+  the config with the last run's and asks once; `--yes` or no terminal
+  aborts with exit 2. The script does not pass
+  `--allow-configuration-changes`, because that would also wave through
+  an `airlock.toml` edited by code inside the sandbox.
+- **The mount point stays behind.** airlock creates the target directory
+  under the project and leaves it, empty, after the session; `.gitignore`
+  it along with `airlock.local.toml`.
 - **The wizard needs a terminal.** A project's first run must be
   interactive; a `-p` run in a project with no sandbox stops with
   airlock's "no config, no terminal" error.
@@ -216,6 +267,10 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
 - **Stubs read their behavior from exported env vars** (`STUB_PTY_DUMP`,
   `STUB_EXIT`, `STUB_REMOVE_EXIT`, `STUB_NO_SANDBOX`, `DUMP_ARGV`), reset
   in `new_case`.
+- **The `CONFIG` helper names `airlock.local.toml` in the case's work
+  directory; the stub's `remove` deletes only the pretend sandbox, as the
+  real one does, so the suite can assert what the script itself does to
+  the file.**
 - **A missing stub is expressed as `stub_all_but_airlock`**, never as an
   omitted call.
 - **`assert_not_grep` fails on a missing file rather than passing.**
