@@ -25,7 +25,8 @@ airlock-claude
 
 The first run builds a local `airlock-claude:latest` image (a minimal
 `python:3.14-slim` base with `git`, `curl`, `ripgrep`, `tmux`, `vim` and
-friends, plus Claude Code itself); later runs reuse it, and Claude Code
+friends, the latest LTS Node.js installed through `nvm`, plus Claude Code
+itself); later runs reuse it, and Claude Code
 updates itself at startup so a new release needs no rebuild
 (`AIRLOCK_CLAUDE_SKIP_UPDATE=1` skips the check).
 

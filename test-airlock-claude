@@ -636,6 +636,20 @@ assert_eq "ncurses-term
 ncurses-base" "$(grep -o 'ncurses-term\|--reinstall ncurses-base' "$CASE_DIR/Dockerfile" | sed 's/--reinstall //')" \
   "the ncurses-base reinstall comes after ncurses-term"
 assert_grep "^ENV LANG=en_US.UTF-8$" "$CASE_DIR/Dockerfile" "Dockerfile sets a UTF-8 locale"
+assert_grep "nvm-sh/nvm/v[0-9.]*/install.sh" "$CASE_DIR/Dockerfile" "Dockerfile installs a pinned nvm"
+assert_grep "^ENV NVM_DIR=/opt/nvm$" "$CASE_DIR/Dockerfile" "nvm lives at a fixed path outside any home directory"
+assert_grep '^RUN mkdir -p "$NVM_DIR" \\$' "$CASE_DIR/Dockerfile" \
+  "NVM_DIR exists before the installer runs, which refuses a set-but-missing NVM_DIR"
+assert_grep "nvm install --lts" "$CASE_DIR/Dockerfile" "Dockerfile installs the latest LTS Node through nvm"
+assert_grep '^ENV PATH=.*:/opt/nvm/current/bin' "$CASE_DIR/Dockerfile" \
+  "the installed node is on PATH without any shell sourcing nvm"
+assert_grep '"$NVM_DIR/current"' "$CASE_DIR/Dockerfile" "the PATH entry is a symlink nvm points at the default version"
+assert_grep "/etc/profile.d/nvm.sh" "$CASE_DIR/Dockerfile" "login shells get the nvm command"
+assert_grep '^ *'"'"'  \*) PATH="$PATH:/opt/nvm/current/bin" ;;'"'"' \\$' "$CASE_DIR/Dockerfile" \
+  "profile.d puts node back on PATH after /etc/profile resets it for login shells"
+assert_grep "must source /opt/nvm/nvm.sh" "$CASE_DIR/Dockerfile" \
+  "system memory tells Claude Code how to reach nvm from a non-login shell"
+assert_grep 'chmod -R a+rwX "$NVM_DIR"' "$CASE_DIR/Dockerfile" "nvm tree stays writable for a non-root VM user"
 assert_grep "en_US.UTF-8 UTF-8' > /etc/locale.gen" "$CASE_DIR/Dockerfile" "Dockerfile seeds locale.gen with that locale"
 assert_grep "locale-gen" "$CASE_DIR/Dockerfile" "Dockerfile generates it"
 assert_grep "etc/claude-code/managed-settings.json" "$CASE_DIR/Dockerfile" \

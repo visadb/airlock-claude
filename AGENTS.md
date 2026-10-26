@@ -293,6 +293,35 @@ tmux, UTF-8, the permission bypass); the reasoning behind it lives here:
   come *after* `ncurses-term`, in the same `RUN` so the apt lists are still
   present, and before they're deleted. `--reinstall` is what makes apt
   touch a package that's already at the wanted version.
+- **Node.js comes from `nvm` at `NVM_DIR=/opt/nvm`, and `PATH` points at a
+  `current` symlink rather than at a versioned directory.** The LTS version
+  `nvm install --lts` picks isn't known when the `ENV PATH` line is written,
+  so the build resolves the `default` alias afterward and links `current` to
+  it; that one static `PATH` entry is what makes `node`, `npm` and `npx`
+  resolve in every shell — Claude Code's non-interactive `Bash` tool
+  included — without anything having to source `nvm.sh`. **`/etc/profile.d/nvm.sh`
+  appends the same entry again, and that duplication is load-bearing:**
+  Debian's `/etc/profile` resets `PATH` to a fixed list before it reads
+  `profile.d`, so every login shell — each new tmux window or pane — loses
+  the image's `ENV PATH` additions (`/opt/claude/.local/bin` goes the same
+  way). The `claude` process itself is unaffected: airlock only wraps the
+  command in a login shell under its own `--login` flag, which this script
+  doesn't pass, so `claude` and its `Bash` tool see the `ENV` as written.
+  The same `profile.d` file sources `nvm.sh` so login shells get the `nvm`
+  *command*, which is a shell function; that part gates on `BASH_VERSION`
+  because `/etc/profile.d` is read by `dash` too and `nvm.sh` isn't POSIX
+  `sh` (the `PATH` part above it is, on purpose), and sources with
+  `--no-use` so a login shell doesn't pay for an `nvm use default` it
+  doesn't need. The managed `CLAUDE.md` says how to reach `nvm` from a
+  non-login shell, since the `Bash` tool is one. The same `--no-use` on the build line is what
+  lets `nvm.sh` be sourced before any version exists. The `mkdir -p` ahead of the installer is required, not tidiness: the
+  installer aborts when `NVM_DIR` is set but the directory is missing,
+  rather than creating it. `PROFILE=/dev/null`
+  stops the installer appending to a `.bashrc` under the build's `HOME`,
+  which no VM user would ever read. Like `/opt/claude`, the tree is outside
+  any home directory and left `a+rwX`, so a non-root VM user can
+  `nvm install` another version or `npm install -g`. The installer URL pins
+  an nvm release on purpose; bump it by hand.
 - **`CLAUDE_INSTALL_HOME=/opt/claude` is a fixed path outside any home
   directory**, so the launcher path doesn't depend on which user the VM ends up
   running as, and the tree is left world-writable (`chmod -R a+rwX`) so a

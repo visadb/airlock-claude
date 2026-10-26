@@ -332,6 +332,24 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update \
 
 ENV LANG=en_US.UTF-8
 
+ENV NVM_DIR=/opt/nvm
+ENV PATH="$PATH:/opt/nvm/current/bin"
+RUN mkdir -p "$NVM_DIR" \
+ && PROFILE=/dev/null bash -c 'curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash' \
+ && bash -c '. "$NVM_DIR/nvm.sh" --no-use && nvm install --lts && nvm alias default "lts/*" \
+             && ln -sfn "$NVM_DIR/versions/node/$(nvm version default)" "$NVM_DIR/current"' \
+ && printf '%s\n' \
+      'case ":$PATH:" in' \
+      '  *":/opt/nvm/current/bin:"*) ;;' \
+      '  *) PATH="$PATH:/opt/nvm/current/bin" ;;' \
+      'esac' \
+      'export PATH' \
+      'if [ -n "$BASH_VERSION" ] && [ -s "${NVM_DIR:-/opt/nvm}/nvm.sh" ]; then' \
+      '  . "${NVM_DIR:-/opt/nvm}/nvm.sh" --no-use' \
+      'fi' \
+      > /etc/profile.d/nvm.sh \
+ && chmod -R a+rwX "$NVM_DIR"
+
 ENV CLAUDE_INSTALL_HOME=/opt/claude
 ENV PATH="$PATH:/opt/claude/.local/bin"
 RUN mkdir -p "$CLAUDE_INSTALL_HOME" \
@@ -423,6 +441,14 @@ RUN printf '%s\n' \
       'delete or overwrite a virtualenv you did not create in this session. Make' \
       'your own under a different name, for example python3 -m venv .venv-airlock,' \
       'and leave the existing one alone.' \
+      '' \
+      '## Node.js' \
+      '' \
+      'The Node.js LTS current at image build time is on PATH through' \
+      '/opt/nvm/current/bin, so node, npm and npx work in every shell with no' \
+      'nvm use needed. nvm itself is a shell function: login shells have it, and' \
+      'a non-login shell (this Bash tool included) must source /opt/nvm/nvm.sh' \
+      'first to run nvm install or nvm use.' \
       > /etc/claude-code/CLAUDE.md
 
 RUN printf '%s\n' \
