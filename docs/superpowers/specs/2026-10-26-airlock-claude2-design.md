@@ -145,9 +145,11 @@ highest-precedence sources, apply to whichever user runs, and sit
 outside `~/.claude`, which the pack mounts from the host and shares
 between sandboxes.
 
-The heredoc text contains no apostrophe. (It is single-quoted on the
-host; the suite checks both the shape and `bash -n` of the extracted
-script.)
+The prelude is a quoted heredoc on the host (`<<'PRELUDE'`), and the
+files it writes in the sandbox are quoted heredocs inside it with other
+delimiters, so quotes, apostrophes and `$` in the content pass through
+both layers untouched. The suite extracts the script from the launch
+argv and runs `bash -n` on it.
 
 ## `-r|--rebuild`
 
@@ -216,8 +218,7 @@ Case groups:
   `CLAUDE.md` with the 403 line, the revert reminder,
   `VERIFY_X509_STRICT`, the virtualenv line, the history rule, the apk
   note; no `nvm`; `exec tmux -u new-session -A -s claude` with
-  `printf '%q '` when tmux is on, `exec "$@"` when off; no apostrophe
-  in the heredoc region of the script.
+  `printf '%q '` when tmux is on, `exec "$@"` when off.
 - rebuild: plain run does not remove; `-r` logs `remove --force`
   before `LAUNCH`; failed remove exits 1 without a launch.
 - session log: all cases from the old suite carried over.
