@@ -288,6 +288,48 @@ new_case; stub_all
 run_script -x --
 assert_rc 2 "$RC" "-x with an empty -- exits 2"
 
+section "session script"
+new_case; stub_all
+run_script
+if bash -n "$(SESSION_SCRIPT)" 2>"$CASE_DIR/ss.err"; then
+  pass "the sandbox-side script parses under bash -n"
+else
+  fail "the sandbox-side script parses under bash -n" "$(cat "$CASE_DIR/ss.err")"
+fi
+assert_eq 'command -v tmux >/dev/null 2>&1 || apk add --quiet tmux || exit 1' \
+  "$(sed -n 1p "$(SESSION_SCRIPT)")" "tmux is installed first, only if missing, and a failed install stops the session"
+assert_grep "^cat > /etc/tmux.conf <<" "$(SESSION_SCRIPT)" "the system tmux config is written on every launch"
+assert_grep "^set -g mouse on$" "$(SESSION_SCRIPT)" "tmux config turns the mouse on"
+assert_grep "^set -g set-clipboard on$" "$(SESSION_SCRIPT)" "tmux config forwards copies to the host clipboard"
+assert_grep '^set -as terminal-features ",\*:clipboard"$' "$(SESSION_SCRIPT)" "tmux config asserts OSC 52 support for every terminal"
+assert_grep '^set -g default-terminal "tmux-256color"$' "$(SESSION_SCRIPT)" "tmux config keeps 256 colours"
+assert_grep "^mkdir -p /etc/claude-code$" "$(SESSION_SCRIPT)" "the managed Claude Code directory is created"
+assert_grep "^cat > /etc/claude-code/managed-settings.json <<" "$(SESSION_SCRIPT)" "the managed settings are written on every launch"
+assert_grep '"defaultMode": "bypassPermissions"' "$(SESSION_SCRIPT)" "managed settings bypass permission prompts"
+assert_grep '"skipDangerousModePermissionPrompt": true' "$(SESSION_SCRIPT)" "managed settings pre-accept the bypass warning"
+assert_grep "^cat > /etc/claude-code/CLAUDE.md <<" "$(SESSION_SCRIPT)" "the managed memory is written on every launch"
+assert_grep "denied by network policy" "$(SESSION_SCRIPT)" "managed memory describes the 403 the proxy answers denied requests with"
+assert_grep "remind them to revert the airlock" "$(SESSION_SCRIPT)" "managed memory tells Claude Code it can ask for temporary network access"
+assert_grep "Alpine Linux on musl" "$(SESSION_SCRIPT)" "managed memory says the sandbox is Alpine on musl and packages come from apk"
+assert_grep "VERIFY_X509_STRICT" "$(SESSION_SCRIPT)" "managed memory tells Claude Code how to get Python past the TLS proxy"
+assert_grep "delete or overwrite a virtualenv you did not create in this session" "$(SESSION_SCRIPT)" \
+  "managed memory keeps Claude Code out of the host's virtualenvs"
+assert_grep "Never add notes about how something used to work" "$(SESSION_SCRIPT)" "managed memory forbids history in comments and docs"
+assert_not_grep "nvm" "$(SESSION_SCRIPT)" "managed memory carries nothing about the old image's nvm"
+assert_eq "1" "$(grep -c '^exec ' "$(SESSION_SCRIPT)")" "exactly one exec line hands off"
+
+new_case; stub_all
+run_script -T
+assert_not_grep "apk add --quiet tmux" "$(SESSION_SCRIPT)" "-T installs no tmux"
+assert_grep "^cat > /etc/tmux.conf <<" "$(SESSION_SCRIPT)" "-T still writes the tmux config, for a tmux started by hand"
+assert_grep "/etc/claude-code/CLAUDE.md" "$(SESSION_SCRIPT)" "-T still writes the managed memory"
+assert_eq 'exec "$@"' "$(tail -n 1 "$(SESSION_SCRIPT)")" "-T ends with a plain exec"
+
+new_case; stub_all
+run_script -x -- bash
+assert_grep "/etc/claude-code/managed-settings.json" "$(SESSION_SCRIPT)" "-x sessions get the same prelude"
+assert_grep "apk add --quiet tmux" "$(SESSION_SCRIPT)" "-x under tmux installs tmux too"
+
 printf '\n%s\n' "----------------------------------------"
 printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ] || exit 1
