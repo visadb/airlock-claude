@@ -102,7 +102,7 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   either; a "did the sandbox exist before" check on the host would miss
   both and launch a tmux that is not there. Instead: `command -v tmux ||
   apk add tmux`, and the files under `/etc` are rewritten each time (one
-  `printf` each), so a changed text in a newer script reaches an existing
+  heredoc each), so a changed text in a newer script reaches an existing
   sandbox without a `-r`. The tmux install is skipped under `-T`, and a
   failed install exits 1 before tmux is launched, so apk's own error is
   what the user sees rather than "tmux: not found". The `alpine` pack's

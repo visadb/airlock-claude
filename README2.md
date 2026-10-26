@@ -63,7 +63,7 @@ airlock-claude2 -x -- bash               # a sandboxed shell, no claude
 ## Things to know
 
 **What runs before the session.** Every launch first runs a short script
-inside the sandbox: it installs tmux with `apk add` if it is missing,
+inside the sandbox: it installs tmux with `apk add` if it is missing (unless `-T`),
 writes `/etc/tmux.conf` (mouse on, copies go to the host clipboard), and
 writes Claude Code's managed settings (bypass permissions) and managed
 `CLAUDE.md` under `/etc/claude-code`. The files are rewritten on every
