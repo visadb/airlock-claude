@@ -1,4 +1,15 @@
-[mounts."orbit"]
+[packs]
+alpine = { version = "1", args = { allow-apk = true } }
+claude = { version = "1", args = { acp = false } }
+git = { version = "1" }
+#nodejs = { version = "1", args = { allow-npm = true, node-version = "lts" } }
+#python = { version = "1", args = { allow-pypi = true, python-version = "latest" } }
+
+[mounts."airlock"]
 source = "~/src/airlock"
 target = "airlock"
 read_only = true
+
+[clipboard]
+copy = true
+paste = false
