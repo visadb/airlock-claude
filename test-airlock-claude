@@ -330,6 +330,7 @@ assert_eq 'exec "$@"' "$(tail -n 1 "$(SESSION_SCRIPT)")" "-T ends with a plain e
 new_case; stub_all
 run_script -T
 mkdir -p "$CASE_DIR/etc"
+printf '%s\n' 'root:x:0:0:root:/root:/bin/sh' 'bin:x:1:1:bin:/bin:/sbin/nologin' > "$CASE_DIR/etc/passwd"
 sed "s#/etc/#$CASE_DIR/etc/#g" "$(SESSION_SCRIPT)" > "$CASE_DIR/prelude"
 bash -c "$(cat "$CASE_DIR/prelude")" airlock-claude true > "$CASE_DIR/prelude.out" 2>&1
 assert_rc 0 "$?" "running the prelude against a substitute /etc succeeds and reaches the handoff"
@@ -344,6 +345,19 @@ set -g default-terminal "tmux-256color"
 EOF
 )
 assert_eq "$EXPECTED_TMUX_CONF" "$(cat "$CASE_DIR/etc/tmux.conf")" "the written tmux config is exactly the four settings"
+EXPECTED_LS_ALIASES=$(cat <<'EOF'
+alias ls='ls --color=auto'
+alias l='ls -CF'
+alias la='ls -A'
+alias ll='ls -lh'
+alias lll='ls -lha'
+EOF
+)
+assert_eq "$EXPECTED_LS_ALIASES" "$(cat "$CASE_DIR/etc/bash/ls-aliases.sh")" "interactive bash gets coloured ls and the l, la, ll, lll aliases"
+assert_eq "d" "$(bash -c "shopt -s expand_aliases; . '$CASE_DIR/etc/bash/ls-aliases.sh'
+ll -d '$CASE_DIR'" | cut -c1)" "the aliases parse and ll gives a long listing"
+assert_eq $'root:x:0:0:root:/root:/bin/bash\nbin:x:1:1:bin:/bin:/sbin/nologin' "$(cat "$CASE_DIR/etc/passwd")" \
+  "root's login shell becomes bash, so new tmux windows open bash, and no other entry changes"
 assert_grep '"defaultMode": "bypassPermissions"' "$CASE_DIR/etc/claude-code/managed-settings.json" \
   "the written managed settings bypass permission prompts"
 assert_grep 'ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT' "$CASE_DIR/etc/claude-code/CLAUDE.md" \
@@ -353,6 +367,7 @@ assert_grep 'kwargs\["ssl_context"\] = ctx' "$CASE_DIR/etc/claude-code/CLAUDE.md
 assert_eq "the commit message, and nowhere else." "$(tail -n 1 "$CASE_DIR/etc/claude-code/CLAUDE.md")" \
   "the written memory runs to its last line, with nothing swallowed after it"
 assert_not_grep "^\(TMUX_CONF\|SETTINGS\|CLAUDE_MD\)$" "$CASE_DIR/etc/tmux.conf" "no heredoc terminator leaks into the tmux config"
+assert_not_grep "^\(LS_ALIASES\|TMUX_CONF\|SETTINGS\)$" "$CASE_DIR/etc/bash/ls-aliases.sh" "no heredoc terminator leaks into the ls aliases"
 assert_not_grep "^\(TMUX_CONF\|SETTINGS\|CLAUDE_MD\)$" "$CASE_DIR/etc/claude-code/managed-settings.json" "no heredoc terminator leaks into the managed settings"
 assert_not_grep "^\(TMUX_CONF\|SETTINGS\|CLAUDE_MD\)$" "$CASE_DIR/etc/claude-code/CLAUDE.md" "no heredoc terminator leaks into the managed memory"
 

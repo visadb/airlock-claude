@@ -185,10 +185,11 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   the handoff passes one string so the path is the same for every command.
   `printf '%q '` re-quotes each word for that shell, so a multi-word
   `-p "run the tests"` stays one word. The shell that reads the string is
-  tmux's `default-shell` (busybox `ash` for root on Alpine), so a word
-  containing a newline, which `%q` writes as `$'…'`, depends on that shell
-  understanding `$'…'`; busybox `ash` does. The `claude` pack installs
-  `bash` on Alpine, so the wrapper is always there.
+  tmux's `default-shell`, root's login shell, which the prelude makes
+  `bash`; a word containing a newline, which `%q` writes as `$'…'`, needs
+  a shell that understands `$'…'`, and both `bash` and busybox `ash`
+  do. The `claude` pack installs `bash` on Alpine, so the wrapper is
+  always there.
 - **`/etc/claude-code/managed-settings.json` is what puts the session in
   `bypassPermissions`**, with `skipDangerousModePermissionPrompt` so a new
   sandbox doesn't ask. Managed settings are the highest-precedence source,
@@ -218,6 +219,18 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   on the handoff forces UTF-8 output regardless of the locale; Alpine's
   musl libc is UTF-8 anyway, but the flag is what keeps Claude Code's
   box-drawing intact if that ever changes.
+- **The `ls` aliases are `/etc/bash/ls-aliases.sh`.** Alpine's
+  `/etc/bash/bashrc` sources `/etc/bash/*.sh` in every interactive bash,
+  so a file of the script's own there needs no edit to a file the system
+  owns. `ls` carries `--color=auto` (busybox `ls` understands it), and
+  `l`, `la`, `ll`, `lll` are written as plain `ls` so they pick up the
+  colour through that alias.
+- **Root's login shell is `bash`.** Alpine ships root with `/bin/sh`
+  (busybox `ash`), which reads nothing under `/etc/bash`. No `SHELL`
+  reaches the tmux server, so tmux takes its `default-shell` from
+  `/etc/passwd`, and a new window or pane opens root's login shell. The
+  prelude's `sed` rewrites only a root entry ending in `/bin/sh`, so it is
+  idempotent and leaves a shell someone chose by hand alone.
 - **`AIRLOCK_PTY_DUMP=1` is an env prefix on the launch line.** It is read
   by the airlock CLI on the host, which writes every byte of the guest
   pty to `pty.dump` in the sandbox directory, truncating at each start.

@@ -305,6 +305,15 @@ set -g set-clipboard on
 set -as terminal-features ",*:clipboard"
 set -g default-terminal "tmux-256color"
 TMUX_CONF
+mkdir -p /etc/bash
+cat > /etc/bash/ls-aliases.sh <<'LS_ALIASES'
+alias ls='ls --color=auto'
+alias l='ls -CF'
+alias la='ls -A'
+alias ll='ls -lh'
+alias lll='ls -lha'
+LS_ALIASES
+sed -i 's#^\(root:.*:\)/bin/sh$#\1/bin/bash#' /etc/passwd
 mkdir -p /etc/claude-code
 cat > /etc/claude-code/managed-settings.json <<'SETTINGS'
 {
