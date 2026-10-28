@@ -155,6 +155,7 @@ assert_grep "\-M, --no-monitor" "$CASE_DIR/out" "--help documents --no-monitor"
 assert_grep "\-T, --no-tmux" "$CASE_DIR/out" "--help documents --no-tmux"
 assert_grep "\-x, --exec" "$CASE_DIR/out" "--help documents --exec"
 assert_grep "\-r, --rebuild" "$CASE_DIR/out" "--help documents --rebuild"
+assert_grep "\-c, --remote-control" "$CASE_DIR/out" "--help documents --remote-control"
 assert_grep "setup wizard" "$CASE_DIR/out" "--help says the first run goes through airlock's wizard"
 assert_grep "pty.dump" "$CASE_DIR/out" "--help documents the session log"
 assert_grep "airlock info" "$CASE_DIR/out" "--help says where to find the sandbox directory the log is in"
@@ -449,9 +450,9 @@ assert_grep '^\[mounts."other"\]$' "$(CONFIG)" "--mount-rw adds a mounts table n
 assert_grep "^source = \"$CASE_DIR/other\"\$" "$(CONFIG)" "the mount's source is the host directory"
 assert_grep '^target = "other"$' "$(CONFIG)" "the mount's target is the basename, relative to the project"
 assert_grep '^read_only = false$' "$(CONFIG)" "--mount-rw mounts read-write"
-assert_eq "# BEGIN airlock-claude mounts (rewritten on every airlock-claude run)" "$(sed -n 1p "$(CONFIG)")" \
+assert_eq "# BEGIN airlock-claude config (rewritten on every airlock-claude run)" "$(sed -n 1p "$(CONFIG)")" \
   "the block opens with its marker, which says the block is the script's"
-assert_eq "# END airlock-claude mounts" "$(tail -n 1 "$(CONFIG)")" "the block closes with its marker"
+assert_eq "# END airlock-claude config" "$(tail -n 1 "$(CONFIG)")" "the block closes with its marker"
 assert_grep "^LAUNCH:" "$LOG" "--mount-rw still launches"
 
 new_case; stub_all
@@ -469,7 +470,7 @@ assert_grep '^\[mounts."three"\]$' "$(CONFIG)" "read-write and read-only mounts 
 assert_eq "false
 false
 true" "$(sed -n 's/^read_only = //p' "$(CONFIG)")" "each mount keeps its own mode"
-assert_eq "1" "$(grep -c '^# BEGIN airlock-claude mounts' "$(CONFIG)")" "all mounts share one block"
+assert_eq "1" "$(grep -c '^# BEGIN airlock-claude config' "$(CONFIG)")" "all mounts share one block"
 
 new_case; stub_all
 mkdir -p "$CASE_DIR/joined"
@@ -534,7 +535,7 @@ run_script --mount-rw "$CASE_DIR/other"
 assert_rc 0 "$RC" "an existing airlock.local.toml is accepted"
 assert_eq "[vm]" "$(sed -n 1p "$(CONFIG)")" "content already in the file stays first"
 assert_grep '^cpus = 2$' "$(CONFIG)" "content already in the file is kept"
-assert_eq "# END airlock-claude mounts" "$(tail -n 1 "$(CONFIG)")" "the block is appended after it"
+assert_eq "# END airlock-claude config" "$(tail -n 1 "$(CONFIG)")" "the block is appended after it"
 assert_eq "" "$(sed -n 3p "$(CONFIG)")" "one blank line separates the kept content from the block"
 
 new_case; stub_all
@@ -543,7 +544,7 @@ run_script --mount-rw "$CASE_DIR/one"
 run_script --mount-ro "$CASE_DIR/two"
 assert_not_grep '"one"' "$(CONFIG)" "the next run's block replaces the previous mounts"
 assert_grep '^\[mounts."two"\]$' "$(CONFIG)" "the next run's mounts are in"
-assert_eq "1" "$(grep -c '^# BEGIN airlock-claude mounts' "$(CONFIG)")" "replacing leaves one block, not two"
+assert_eq "1" "$(grep -c '^# BEGIN airlock-claude config' "$(CONFIG)")" "replacing leaves one block, not two"
 
 new_case; stub_all
 mkdir -p "$CASE_DIR/other"
@@ -552,7 +553,7 @@ run_script --mount-rw "$CASE_DIR/other"
 run_script
 assert_rc 0 "$RC" "a run without mount flags exits 0"
 assert_grep '^cpus = 2$' "$(CONFIG)" "a run without mount flags keeps the content that is not the script's"
-assert_not_grep "airlock-claude mounts" "$(CONFIG)" "a run without mount flags removes the block"
+assert_not_grep "airlock-claude config" "$(CONFIG)" "a run without mount flags removes the block"
 assert_not_grep "mounts\." "$(CONFIG)" "no mount survives a run without mount flags"
 
 new_case; stub_all
@@ -571,7 +572,7 @@ assert_not_grep "LAUNCH:" "$LOG" "an unreadable airlock.local.toml does not laun
 for flags in with-mount without-flags; do
   new_case; stub_all
   mkdir -p "$CASE_DIR/other"
-  printf '[vm]\ncpus = 2\n# BEGIN airlock-claude mounts (rewritten on every airlock-claude run)\n[mounts."old"]\n[after]\nkey = 1\n' > "$(CONFIG)"
+  printf '[vm]\ncpus = 2\n# BEGIN airlock-claude config (rewritten on every airlock-claude run)\n[mounts."old"]\n[after]\nkey = 1\n' > "$(CONFIG)"
   cp "$(CONFIG)" "$CASE_DIR/before"
   if [ "$flags" = with-mount ]; then run_script --mount-rw "$CASE_DIR/other"; else run_script; fi
   assert_rc 1 "$RC" "a BEGIN line without its END line exits 1 ($flags)"
@@ -583,16 +584,16 @@ done
 
 new_case; stub_all
 mkdir -p "$CASE_DIR/other"
-printf '[vm]\ncpus = 2\n\n# BEGIN airlock-claude mounts (rewritten on every airlock-claude run)\n[mounts."old"]\nsource = "/x/old"\n# END airlock-claude mounts\n[after]\nkey = 1\n' > "$(CONFIG)"
+printf '[vm]\ncpus = 2\n\n# BEGIN airlock-claude config (rewritten on every airlock-claude run)\n[mounts."old"]\nsource = "/x/old"\n# END airlock-claude config\n[after]\nkey = 1\n' > "$(CONFIG)"
 run_script --mount-rw "$CASE_DIR/other"
 assert_grep '^\[after\]$' "$(CONFIG)" "content after the old block is kept"
 assert_grep '^key = 1$' "$(CONFIG)" "keys after the old block are kept"
 assert_not_grep '"old"' "$(CONFIG)" "the old block's mounts are dropped"
-assert_eq "1" "$(grep -c '^# BEGIN airlock-claude mounts' "$(CONFIG)")" "exactly one block remains after a rewrite"
-assert_eq "# END airlock-claude mounts" "$(tail -n 1 "$(CONFIG)")" "the new block is at the end of the file"
+assert_eq "1" "$(grep -c '^# BEGIN airlock-claude config' "$(CONFIG)")" "exactly one block remains after a rewrite"
+assert_eq "# END airlock-claude config" "$(tail -n 1 "$(CONFIG)")" "the new block is at the end of the file"
 
 new_case; stub_all
-printf '# BEGIN airlock-claude mounts (x)\n[mounts."a"]\n# END airlock-claude mounts\n# BEGIN airlock-claude mounts (x)\n[mounts."b"]\n# END airlock-claude mounts\n' > "$(CONFIG)"
+printf '# BEGIN airlock-claude config (x)\n[mounts."a"]\n# END airlock-claude config\n# BEGIN airlock-claude config (x)\n[mounts."b"]\n# END airlock-claude config\n' > "$(CONFIG)"
 run_script
 assert_rc 0 "$RC" "a file of two blocks is accepted"
 assert_absent "$(CONFIG)" "both blocks are stripped, leaving nothing, so the file is removed"
@@ -641,8 +642,8 @@ assert_rc 0 "$RC" "mounts on a first run are fine when a hand-written airlock.lo
 new_case; stub_all
 mkdir -p "$CASE_DIR/other"
 export STUB_NO_SANDBOX=1
-printf '%s\n' '# BEGIN airlock-claude mounts (rewritten on every airlock-claude run)' '[mounts."old"]' \
-  'source = "/old"' 'target = "old"' 'read_only = false' '# END airlock-claude mounts' > "$(CONFIG)"
+printf '%s\n' '# BEGIN airlock-claude config (rewritten on every airlock-claude run)' '[mounts."old"]' \
+  'source = "/old"' 'target = "old"' 'read_only = false' '# END airlock-claude config' > "$(CONFIG)"
 run_script --mount-rw "$CASE_DIR/other"
 assert_rc 2 "$RC" "an old block of the script's own does not count as config that keeps the wizard away"
 
@@ -660,6 +661,87 @@ run_script -r
 assert_grep "^REMOVE: remove --force$" "$LOG" "-r without mounts removes the sandbox"
 assert_absent "$(CONFIG)" "-r without mounts also drops a block-only file, so the wizard runs again"
 assert_grep "^LAUNCH:" "$LOG" "-r without mounts launches"
+
+section "remote control"
+new_case; stub_all
+run_script -c
+assert_rc 0 "$RC" "-c exits 0"
+assert_eq "LAUNCH: start --monitor --network deny-by-default -- bash -c <script> airlock-claude claude" \
+  "$(grep '^LAUNCH:' "$LOG")" "-c keeps the launch argv and the deny-by-default policy"
+assert_eq "# BEGIN airlock-claude config (rewritten on every airlock-claude run)" "$(sed -n 1p "$(CONFIG)")" \
+  "-c writes the script's marked block"
+assert_eq "# END airlock-claude config" "$(tail -n 1 "$(CONFIG)")" "the -c block closes with its marker"
+assert_grep '^\[network.services\]$' "$(CONFIG)" "-c configures the network services"
+assert_grep '^anthropic = false$' "$(CONFIG)" "-c turns off the anthropic service, whose credential check refuses Remote Control"
+assert_grep '^\[network.rules.airlock-claude-sign-in\]$' "$(CONFIG)" "-c adds its own sign-in rule"
+assert_grep '^allow = \["platform.claude.com:443"\]$' "$(CONFIG)" "-c allows the token host that /login needs once the service is off"
+assert_grep '^\[mounts.claude-dir\]$' "$(CONFIG)" "-c overrides the claude pack's shared ~/.claude mount"
+assert_grep "^source = \"$STUB_BOX/remote-control-claude\"\$" "$(CONFIG)" \
+  "-c's Claude Code directory lives in this sandbox's directory, shared with no other sandbox"
+assert_grep '^target = "~/.claude"$' "$(CONFIG)" "-c's directory is mounted as ~/.claude"
+assert_grep '^missing = "create-dir"$' "$(CONFIG)" "airlock creates -c's directory on the first -c run"
+assert_grep "^unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC$" "$(SESSION_SCRIPT)" \
+  "-c clears the claude pack's setting that hides /remote-control"
+if bash -n "$(SESSION_SCRIPT)" 2>"$CASE_DIR/ss.err"; then
+  pass "the -c sandbox-side script parses under bash -n"
+else
+  fail "the -c sandbox-side script parses under bash -n" "$(cat "$CASE_DIR/ss.err")"
+fi
+assert_eq "1" "$(grep -c '^exec ' "$(SESSION_SCRIPT)")" "-c keeps exactly one exec line"
+
+new_case; stub_all
+run_script --remote-control
+assert_grep '^anthropic = false$' "$(CONFIG)" "--remote-control is the long form"
+
+new_case; stub_all
+run_script
+assert_not_grep "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" "$(SESSION_SCRIPT)" \
+  "without -c the claude pack's environment is left alone"
+
+new_case; stub_all
+run_script -c -T
+mkdir -p "$CASE_DIR/etc"
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 bash -c "$(sed "s#/etc/#$CASE_DIR/etc/#g" "$(SESSION_SCRIPT)")" airlock-claude \
+  sh -c 'echo "nonessential=${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-unset}"' > "$CASE_DIR/prelude.out" 2>&1
+assert_grep "^nonessential=unset$" "$CASE_DIR/prelude.out" "the command -c hands off to no longer sees the setting"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/other"
+run_script -c --mount-ro "$CASE_DIR/other"
+assert_rc 0 "$RC" "-c combines with mounts"
+assert_eq "1" "$(grep -c '^# BEGIN airlock-claude config' "$(CONFIG)")" "-c and the mounts share one block"
+assert_grep '^\[mounts."other"\]$' "$(CONFIG)" "the mount is in the shared block"
+assert_grep '^anthropic = false$' "$(CONFIG)" "the -c settings are in the shared block"
+
+new_case; stub_all
+printf '[vm]\ncpus = 2\n' > "$(CONFIG)"
+run_script -c
+run_script
+assert_grep '^cpus = 2$' "$(CONFIG)" "a run without -c keeps the content that is not the script's"
+assert_not_grep "anthropic" "$(CONFIG)" "a run without -c turns the anthropic service back on"
+assert_not_grep "claude-dir" "$(CONFIG)" "a run without -c goes back to the shared ~/.claude"
+
+new_case; stub_all
+run_script -c
+run_script
+assert_absent "$(CONFIG)" "a file that held only the -c block is removed after a run without -c"
+
+new_case; stub_all
+export STUB_NO_SANDBOX=1
+printf '[packs]\nalpine = { version = "1" }\n' > "$WORK/airlock.toml"
+run_script -c
+assert_rc 2 "$RC" "-c on a project with no sandbox exits 2, even with an airlock.toml, since its directory needs one"
+assert_grep "remote-control needs a sandbox" "$CASE_DIR/err" "the -c refusal says a sandbox has to exist first"
+assert_absent "$(CONFIG)" "the -c refusal writes no file"
+assert_not_grep "LAUNCH:" "$LOG" "the -c refusal does not launch"
+
+new_case; stub_all
+mkdir -p "$STUB_BOX"; : > "$STUB_BOX/disk.img"
+printf '[packs]\nalpine = { version = "1" }\n' > "$WORK/airlock.toml"
+run_script -r -c
+assert_rc 2 "$RC" "-r with -c exits 2"
+assert_not_grep "^REMOVE:" "$LOG" "-r with -c is refused before anything is removed"
+assert_exists "$STUB_BOX/disk.img" "the sandbox survives a refused -r -c"
 
 printf '\n%s\n' "----------------------------------------"
 printf '%d passed, %d failed\n' "$PASSED" "$FAILED"

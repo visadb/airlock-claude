@@ -6,7 +6,7 @@ Guidance for coding agents working in this repository.
 
 A single-file launcher, `airlock-claude`, that runs Claude Code sandboxed
 in an `airlock` VM in any directory, built on airlock's packs and
-templates. It builds nothing and writes no config but the mounts block:
+templates. It builds nothing and writes no config but its one marked block:
 airlock's setup wizard picks the packs (or a template) on a project's
 first start, the script imposes the deny-by-default policy on the launch
 line, and a short bash prelude prepares the sandbox before every session.
@@ -27,20 +27,23 @@ order at the bottom, so the call sequence reads as a summary and a
 data-flow diagram:
 
 ```
-parse_args "$@"                      sets MONITOR, USE_TMUX, EXEC, REBUILD, SHOW_USAGE, CLAUDE_ARGS, MOUNTS_RW, MOUNTS_RO
+parse_args "$@"                      sets MONITOR, USE_TMUX, EXEC, REBUILD, REMOTE_CONTROL, SHOW_USAGE, CLAUDE_ARGS, MOUNTS_RW, MOUNTS_RO
 validate_exec_usage <exec> <count>   -x needs a command after --
 require_airlock
 resolve_extra_mounts                 sets MOUNT_SOURCES, MOUNT_TARGETS, MOUNT_READ_ONLY (the array exemption)
-without_mounts_block <file>          -> the file minus the block (1: unreadable, 2: no END line)
+without_config_block <file>          -> the file minus the block (1: unreadable, 2: no END line)
 project_config_present               -> 1 if the project has config the wizard would respect, or nothing
 sandbox_dir                          -> the sandbox directory `airlock info` reports, or nothing
-refuse_mounts_on_first_run <count> <rebuild> <sandbox_dir> <has_config>
+refuse_config_without_sandbox <count> <remote_control> <rebuild> <sandbox_dir> <has_config>
 remove_sandbox_on_rebuild <rebuild>  `airlock remove --force`
-extra_mounts_block                   -> the marked [mounts] block, or nothing (reads the arrays)
-write_mounts_block <block>           rewrites the block in airlock.local.toml, or removes the file
+extra_mounts_config                  -> the [mounts] tables, or nothing (reads the arrays)
+sandbox_dir                          again, for -c's Claude Code directory
+remote_control_config <remote_control> <sandbox_dir>  -> -c's tables, or nothing
+config_block <mounts> <remote_control>                -> the marked block around both, or nothing
+write_config_block <block>           rewrites the block in airlock.local.toml, or removes the file
 sandbox_dir                          again, for the rotation
 keep_previous_pty_dump <dump>        sets last run's log aside as <dump>.previous
-session_script <use_tmux>            -> the bash script that runs in the sandbox
+session_script <use_tmux> <remote_control>  -> the bash script that runs in the sandbox
     (the airlock start line — the handoff)
 sandbox_dir                          again: a first run has no sandbox until airlock made one
 print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-stripped
@@ -53,7 +56,7 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   directly.** Its output includes `CLAUDE_ARGS`, an arbitrary-argument
   array, which can't ride through stdout. It initializes every global it
   owns on its first line, so the defaults live in the function.
-  `resolve_extra_mounts` and `extra_mounts_block` share the exemption for
+  `resolve_extra_mounts` and `extra_mounts_config` share the exemption for
   the same reason: the resolved mounts are three parallel arrays, set by
   the one and read by the other.
 - **Failure is a nonzero `return` with a message on stderr; only the main
@@ -74,7 +77,7 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
 
 ## Why each step is the way it is
 
-- **The script writes no config except the mounts block, and that is
+- **The script writes no config except its marked block, and that is
   what makes templates work.**
   A template can only be chosen in airlock's interactive setup wizard
   (`airlock start` has no `--template` flag), and the wizard runs only
@@ -97,23 +100,24 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   the run: launching on the old sandbox would silently not be a rebuild.
   There is no `rm -rf .airlock`: a current airlock keeps nothing in the
   project.
-- **The mounts are one marked block of `airlock.local.toml`, rewritten on
-  every run.** `airlock start` has no mount flag, so a config file is the
-  only way in, and `airlock.local.toml` is the one airlock reads but a
-  project doesn't commit. The block is bounded by `# BEGIN airlock-claude
-  mounts` and `# END airlock-claude mounts` so the script can replace
+- **The mounts and the `-c` settings are one marked block of
+  `airlock.local.toml`, rewritten on every run.** `airlock start` has no
+  mount or service flag, so a config file is the only way in, and
+  `airlock.local.toml` is the one airlock reads but a project doesn't
+  commit. The block is bounded by `# BEGIN airlock-claude config` and
+  `# END airlock-claude config` so the script can replace
   exactly its own lines and leave a hand-written file's other content
   alone; the BEGIN line says the block is rewritten, so a user editing the
-  file knows not to edit inside it. A run without mount flags removes the
+  file knows not to edit inside it. A run without mount flags or `-c` removes the
   block, and a file left holding only whitespace is removed with it —
   otherwise a leftover file would suppress the wizard after `-r`. That
   rule applies after a block was stripped: a whitespace-only file the
-  script did not write is kept, and a run without mount flags leaves a
+  script did not write is kept, and a run without mount flags or `-c` leaves a
   file that holds no block byte-identical, so a hand-written
   `airlock.local.toml` is never rewritten just because the script ran. A
   `# BEGIN` line without its `# END` line is refused with a message and
   exit 1 rather than stripped to the end of the file; the reader
-  (`without_mounts_block`) is pure bash and reports status 1 for
+  (`without_config_block`) is pure bash and reports status 1 for
   unreadable, 2 for unterminated. Under `-r` that refusal happens after
   `airlock remove`, so a `-r` on such a file removes the sandbox and then
   stops before the launch. Any other read or write failure also aborts
@@ -121,14 +125,39 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   silently not have the mounts. `resolve_extra_mount` rejects a mount path
   containing control characters (exit 2), because a TOML basic string
   can't carry a raw newline and `toml_escaped` covers only `\` and `"`.
-- **`refuse_mounts_on_first_run` runs before `remove_sandbox_on_rebuild`.**
+- **`refuse_config_without_sandbox` runs before `remove_sandbox_on_rebuild`.**
   A file in the project keeps the wizard from running, so mounts can't be
   combined with the start that creates the sandbox: no sandbox yet, or
   `-r`, and no project config of the user's own (`airlock.*`, a non-TOML
   `airlock.local.*`, or an `airlock.local.toml` with content outside the
   block — a leftover block of the script's own doesn't count). Checking
   before the removal is what keeps `-r --mount-rw x` from destroying the
-  sandbox and then failing.
+  sandbox and then failing. `-c` needs an existing sandbox whatever the
+  config, because its Claude Code directory lives in the sandbox
+  directory, which `-r` removes and a first run doesn't have yet.
+- **`-c` exists because the `anthropic` network service refuses
+  Remote Control.** On `api.anthropic.com` the service accepts only its
+  own surrogates and injected masked secrets as credentials, and answers
+  anything else with a 401 (`airlock_foreign_credential`). Remote
+  Control's transport authenticates with a worker credential the API
+  mints for the session (`worker_jwt`, `session_ingress_token`), so it is
+  refused, and Claude Code gives up with close code 4094 (milankinen/airlock#23).
+  `-c` writes `[network.services] anthropic = false`, which leaves the
+  `claude` pack's `claude-tokens` inject rule as plain header injection;
+  a rule allowing `platform.claude.com:443`, the token host `/login`
+  needs once the service no longer allows it; and a `[mounts.claude-dir]`
+  override that points the pack's `~/.claude` mount at
+  `remote-control-claude` in the sandbox directory (`missing =
+  "create-dir"`). Without the service, `/login` writes the real tokens
+  into `~/.claude/.credentials.json`; in the pack's directory, shared by
+  every sandbox with the pack, other sandboxes would read them and,
+  with the service still on, have every API call refused. The sandbox
+  directory belongs to this sandbox alone, and `airlock remove` deletes
+  it, login included. The prelude unsets
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, which the pack sets and
+  which hides `/remote-control`; it is unset in the prelude rather than
+  set in the block because an `[env]` table in the block would collide
+  with one in a hand-written `airlock.local.toml`.
 - **`sandbox_dir` parses `airlock info --json` with `sed`, not `jq`**,
   because the host isn't guaranteed to have `jq`, and the pretty-printed
   JSON puts `"dir"` on a line of its own. It is called twice: before the

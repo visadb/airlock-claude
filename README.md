@@ -57,11 +57,13 @@ airlock-claude -x -- bash               # a sandboxed shell, no claude
 - `--mount-rw <dir>`, `--mount-ro <dir>` — bring other host directories
   into the sandbox, read-write or read-only (repeatable; see **Mounts**
   below).
+- `-c`, `--remote-control` — make `/remote-control` work in this sandbox
+  (see **Remote Control** below).
 - `-x`, `--exec` — run the command after `--` in place of `claude`.
 - `-r`, `--rebuild` — remove the project's sandbox (`airlock remove`) and
   start again, so airlock makes a fresh one and the wizard runs again.
   Anything installed inside the VM is lost; your persisted Claude settings
-  and login are not.
+  and login are not, except a `-c` login, which lives in the sandbox.
 
 ## Things to know
 
@@ -96,8 +98,8 @@ share one). The mounts are written as one marked block in the project's
 `airlock.local.toml` — created if missing, the block replaced on every
 run and removed on a run without mount flags, anything else in the file
 left alone — so add `airlock.local.toml` to the project's `.gitignore`.
-The block is bounded by `# BEGIN airlock-claude mounts` and
-`# END airlock-claude mounts` lines; don't edit inside it, and keep both
+The block is bounded by `# BEGIN airlock-claude config` and
+`# END airlock-claude config` lines; don't edit inside it, and keep both
 lines, since a block missing its END line stops the script.
 A changed mount set is a configuration change: `airlock` asks about it
 once at start; accept it. Without a terminal that question aborts, so
@@ -108,6 +110,24 @@ once without them.
 The mount point `airlock` creates in the project directory remains,
 empty, after the session, and a same-named project directory is
 shadowed for the session, untouched underneath.
+
+**Remote Control.** airlock's `anthropic` network service, which keeps
+the real tokens on the host, refuses the credential Claude Code's
+`/remote-control` connects with
+([airlock#23](https://github.com/milankinen/airlock/issues/23)). `-c`
+turns the service off for the run, allows `platform.claude.com` for
+`/login`, and gives the sandbox a Claude Code directory of its own, in
+the sandbox directory, in place of the `~/.claude` the `claude` pack
+shares between sandboxes; it also clears the pack's
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, which hides the command. The
+settings go into the same marked block of `airlock.local.toml` as the
+mounts. Run `/login` once in the first `-c` session: the sign-in is the
+manual one (open the printed URL, paste the code back), and the real
+tokens land in that directory, seen by this sandbox only. The directory
+starts empty, so settings from the shared one don't carry over, and
+`airlock remove` (or `-r`) deletes it. Switching `-c` on or off is a
+configuration change that `airlock` asks about at start, and like the
+mounts, `-c` needs the sandbox to exist already.
 
 **Session log.** Every run records the session's raw terminal stream to
 `pty.dump` in the sandbox directory (`airlock info` shows it; one previous
@@ -124,7 +144,7 @@ session the per-client workaround, how to recognise a network-policy
 denial, that packages come from `apk`, and to leave host-made virtualenvs
 alone.
 
-Apart from the mounts block, the script writes no config. The wizard's
+Apart from that marked block, the script writes no config. The wizard's
 answers live in the sandbox directory, and `airlock remove` deletes them
 with it; a project's own `airlock.toml` applies as usual.
 

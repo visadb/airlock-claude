@@ -3,10 +3,10 @@
 usage() {
   cat <<'USAGE'
 Usage: airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-r|--rebuild]
-                      [--mount-rw <dir>] [--mount-ro <dir>]
+                      [-c|--remote-control] [--mount-rw <dir>] [--mount-ro <dir>]
                       [-h|--help] [-- <claude args...>]
        airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-r|--rebuild]
-                      [--mount-rw <dir>] [--mount-ro <dir>]
+                      [-c|--remote-control] [--mount-rw <dir>] [--mount-ro <dir>]
                       -x|--exec -- <command...>
 
 Runs Claude Code sandboxed in an airlock VM in the current directory, with
@@ -35,6 +35,16 @@ previous run's log beside it as pty.dump.previous.
                     marked block of airlock.local.toml, rewritten on every
                     run, and need a sandbox to exist already (run once
                     without mounts first, so the setup wizard can run).
+  -c, --remote-control
+                    Make Claude Code's /remote-control work: turn off
+                    airlock's anthropic network service, whose credential
+                    check refuses the Remote Control connection, and give
+                    this sandbox a Claude Code directory of its own, kept in
+                    the sandbox directory, instead of the one the claude
+                    pack shares between sandboxes. /login in this mode puts
+                    the real tokens into that directory and this sandbox
+                    only. Needs a sandbox to exist already; written to the
+                    same marked block of airlock.local.toml as the mounts.
   --mount-ro <dir>  Like --mount-rw, but read-only.
   -x, --exec        Run the command given after -- instead of claude, in
                     the same VM and, by default, the same tmux and monitor
@@ -42,7 +52,8 @@ previous run's log beside it as pty.dump.previous.
   -r, --rebuild     Remove the project's sandbox (`airlock remove`) before
                     starting, so airlock makes a fresh one and the setup
                     wizard runs again. Anything installed inside the VM is
-                    lost; the persisted Claude settings and login are not.
+                    lost; the persisted Claude settings and login are not,
+                    except the sandbox's own -c login, which goes with it.
   -h, --help        Show this help.
 
 Arguments after -- are passed to claude verbatim:
@@ -58,7 +69,7 @@ USAGE
 }
 
 parse_args() {
-  MONITOR=1 USE_TMUX=1 EXEC= REBUILD= SHOW_USAGE= CLAUDE_ARGS=() MOUNTS_RW=() MOUNTS_RO=()
+  MONITOR=1 USE_TMUX=1 EXEC= REBUILD= REMOTE_CONTROL= SHOW_USAGE= CLAUDE_ARGS=() MOUNTS_RW=() MOUNTS_RO=()
   while [[ $# -gt 0 ]]; do
     case $1 in
       --) shift; CLAUDE_ARGS=("$@"); return 0 ;;
@@ -75,6 +86,7 @@ parse_args() {
       --mount-ro=*) MOUNTS_RO+=("${1#--mount-ro=}") ;;
       -x|--exec) EXEC=1 ;;
       -r|--rebuild) REBUILD=1 ;;
+      -c|--remote-control) REMOTE_CONTROL=1 ;;
       -h|--help) SHOW_USAGE=1; break ;;
       *)
         echo "airlock-claude: unknown option: $1" >&2
@@ -151,14 +163,14 @@ resolve_extra_mounts() {
   done
 }
 
-without_mounts_block() {
+without_config_block() {
   local file=$1
   local line inside=
   [[ -f $file ]] || return 1
   while IFS= read -r line || [[ -n $line ]]; do
     if [[ -n $inside ]]; then
-      if [[ $line == "# END airlock-claude mounts" ]]; then inside=; fi
-    elif [[ $line == "# BEGIN airlock-claude mounts"* ]]; then
+      if [[ $line == "# END airlock-claude config" ]]; then inside=; fi
+    elif [[ $line == "# BEGIN airlock-claude config"* ]]; then
       inside=1
     else
       printf '%s\n' "$line"
@@ -175,7 +187,7 @@ project_config_present() {
   for ext in json yaml yml; do
     [[ -e airlock.local.$ext ]] && { printf '1\n'; return 0; }
   done
-  if [[ -f airlock.local.toml ]] && [[ -n $(without_mounts_block airlock.local.toml 2>/dev/null | tr -d '[:space:]') ]]; then
+  if [[ -f airlock.local.toml ]] && [[ -n $(without_config_block airlock.local.toml 2>/dev/null | tr -d '[:space:]') ]]; then
     printf '1\n'
   fi
   return 0
@@ -185,8 +197,12 @@ sandbox_dir() {
   airlock info --json 2>/dev/null | sed -n 's/^ *"dir": *"\(.*\)",\{0,1\}$/\1/p'
 }
 
-refuse_mounts_on_first_run() {
-  local mount_count=$1 rebuild=$2 sandbox=$3 has_config=$4
+refuse_config_without_sandbox() {
+  local mount_count=$1 remote_control=$2 rebuild=$3 sandbox=$4 has_config=$5
+  if [[ -n $remote_control && ( -n $rebuild || -z $sandbox ) ]]; then
+    echo "airlock-claude: --remote-control needs a sandbox to exist already, to keep its Claude Code directory in: run once without it, so airlock's setup wizard can create the sandbox" >&2
+    return 2
+  fi
   (( mount_count > 0 )) || return 0
   [[ -z $has_config ]] || return 0
   if [[ -n $rebuild || -z $sandbox ]]; then
@@ -211,26 +227,42 @@ toml_escaped() {
   printf '%s\n' "$s"
 }
 
-extra_mounts_block() {
+extra_mounts_config() {
   (( ${#MOUNT_SOURCES[@]} > 0 )) || return 0
   local i source target
-  printf '# BEGIN airlock-claude mounts (rewritten on every airlock-claude run)\n'
   for ((i = 0; i < ${#MOUNT_SOURCES[@]}; i++)); do
     source=$(toml_escaped "${MOUNT_SOURCES[i]}")
     target=$(toml_escaped "${MOUNT_TARGETS[i]}")
     printf '[mounts."%s"]\nsource = "%s"\ntarget = "%s"\nread_only = %s\n' \
       "$target" "$source" "$target" "${MOUNT_READ_ONLY[i]}"
   done
-  printf '# END airlock-claude mounts\n'
 }
 
-write_mounts_block() {
+remote_control_config() {
+  local remote_control=$1 sandbox=$2
+  [[ -n $remote_control ]] || return 0
+  local claude_dir
+  claude_dir=$(toml_escaped "$sandbox/remote-control-claude")
+  printf '[network.services]\nanthropic = false\n\n'
+  printf '[network.rules.airlock-claude-sign-in]\nallow = ["platform.claude.com:443"]\n\n'
+  printf '[mounts.claude-dir]\nsource = "%s"\ntarget = "~/.claude"\nmissing = "create-dir"\n' "$claude_dir"
+}
+
+config_block() {
+  local mounts=$1 remote_control=$2
+  local body=$mounts
+  [[ -n $remote_control ]] && body=${body:+$body$'\n\n'}$remote_control
+  [[ -n $body ]] || return 0
+  printf '# BEGIN airlock-claude config (rewritten on every airlock-claude run)\n%s\n# END airlock-claude config\n' "$body"
+}
+
+write_config_block() {
   local block=$1
   local kept= content status
   if [[ -e airlock.local.toml ]]; then
-    kept=$(without_mounts_block airlock.local.toml 2>/dev/null); status=$?
+    kept=$(without_config_block airlock.local.toml 2>/dev/null); status=$?
     if (( status == 2 )); then
-      echo "airlock-claude: airlock.local.toml has a '# BEGIN airlock-claude mounts' line without its '# END airlock-claude mounts' line; fix or remove the block by hand" >&2
+      echo "airlock-claude: airlock.local.toml has a '# BEGIN airlock-claude config' line without its '# END airlock-claude config' line; fix or remove the block by hand" >&2
       return 1
     elif (( status != 0 )); then
       echo "airlock-claude: could not read airlock.local.toml in $PWD" >&2
@@ -260,7 +292,7 @@ keep_previous_pty_dump() {
 }
 
 session_script() {
-  local use_tmux=$1
+  local use_tmux=$1 remote_control=$2
   if [[ -n $use_tmux ]]; then
     cat <<'TMUX_INSTALL'
 command -v tmux >/dev/null 2>&1 || apk add --quiet tmux || exit 1
@@ -360,6 +392,11 @@ approach replaced, or why an old way is gone. That history belongs in
 the commit message, and nowhere else.
 CLAUDE_MD
 PRELUDE
+  if [[ -n $remote_control ]]; then
+    cat <<'REMOTE_CONTROL'
+unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+REMOTE_CONTROL
+  fi
   if [[ -n $use_tmux ]]; then
     cat <<'HANDOFF'
 exec tmux -u new-session -A -s claude "$(printf '%q ' "$@")"
@@ -403,16 +440,17 @@ validate_exec_usage "$EXEC" "${#CLAUDE_ARGS[@]}" || exit $?
 require_airlock || exit 1
 
 resolve_extra_mounts || exit $?
-refuse_mounts_on_first_run "${#MOUNT_SOURCES[@]}" "$REBUILD" "$(sandbox_dir)" "$(project_config_present)" || exit $?
+refuse_config_without_sandbox "${#MOUNT_SOURCES[@]}" "$REMOTE_CONTROL" "$REBUILD" "$(sandbox_dir)" "$(project_config_present)" || exit $?
 
 remove_sandbox_on_rebuild "$REBUILD" || exit 1
 
-write_mounts_block "$(extra_mounts_block)" || exit 1
+CONFIG_BLOCK=$(config_block "$(extra_mounts_config)" "$(remote_control_config "$REMOTE_CONTROL" "$(sandbox_dir)")")
+write_config_block "$CONFIG_BLOCK" || exit 1
 
 SANDBOX_DIR=$(sandbox_dir)
 [[ -n $SANDBOX_DIR ]] && keep_previous_pty_dump "$SANDBOX_DIR/pty.dump"
 
-SESSION_SCRIPT=$(session_script "$USE_TMUX")
+SESSION_SCRIPT=$(session_script "$USE_TMUX" "$REMOTE_CONTROL")
 if [[ -n $EXEC ]]; then
   SESSION_COMMAND=("${CLAUDE_ARGS[@]}")
 else
