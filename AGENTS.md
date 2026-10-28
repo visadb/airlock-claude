@@ -211,11 +211,13 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   The suite extracts the script from the launch argv and runs `bash -n` on
   it.
 - **`/etc/tmux.conf` sets `mouse on`, `set-clipboard on`, a
-  `terminal-features` entry asserting OSC 52 for every terminal, and
-  `default-terminal "tmux-256color"`.** `mouse on` doesn't cost panes
-  their mouse. The `terminal-features` assertion is needed because tmux
-  only emits OSC 52 for terminals it believes support it, and the host
-  terminal on the far side of the VM isn't one it can recognise. `tmux -u`
+  `terminal-features` entry asserting OSC 52 for every terminal,
+  `default-terminal "tmux-256color"` and `base-index 1`.** `base-index 1`
+  numbers windows from 1, matching the keyboard. `mouse on` doesn't
+  cost panes their mouse. The `terminal-features` assertion is needed
+  because tmux only emits OSC 52 for terminals it believes support it,
+  and the host terminal on the far side of the VM isn't one it can
+  recognise. `tmux -u`
   on the handoff forces UTF-8 output regardless of the locale; Alpine's
   musl libc is UTF-8 anyway, but the flag is what keeps Claude Code's
   box-drawing intact if that ever changes.

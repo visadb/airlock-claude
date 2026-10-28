@@ -305,6 +305,7 @@ assert_grep "^set -g mouse on$" "$(SESSION_SCRIPT)" "tmux config turns the mouse
 assert_grep "^set -g set-clipboard on$" "$(SESSION_SCRIPT)" "tmux config forwards copies to the host clipboard"
 assert_grep '^set -as terminal-features ",\*:clipboard"$' "$(SESSION_SCRIPT)" "tmux config asserts OSC 52 support for every terminal"
 assert_grep '^set -g default-terminal "tmux-256color"$' "$(SESSION_SCRIPT)" "tmux config keeps 256 colours"
+assert_grep "^set -g base-index 1$" "$(SESSION_SCRIPT)" "tmux numbers windows from 1"
 assert_grep "^mkdir -p /etc/claude-code$" "$(SESSION_SCRIPT)" "the managed Claude Code directory is created"
 assert_grep "^cat > /etc/claude-code/managed-settings.json <<" "$(SESSION_SCRIPT)" "the managed settings are written on every launch"
 assert_grep '"defaultMode": "bypassPermissions"' "$(SESSION_SCRIPT)" "managed settings bypass permission prompts"
@@ -342,9 +343,10 @@ set -g mouse on
 set -g set-clipboard on
 set -as terminal-features ",*:clipboard"
 set -g default-terminal "tmux-256color"
+set -g base-index 1
 EOF
 )
-assert_eq "$EXPECTED_TMUX_CONF" "$(cat "$CASE_DIR/etc/tmux.conf")" "the written tmux config is exactly the four settings"
+assert_eq "$EXPECTED_TMUX_CONF" "$(cat "$CASE_DIR/etc/tmux.conf")" "the written tmux config is exactly the five settings"
 EXPECTED_LS_ALIASES=$(cat <<'EOF'
 alias ls='ls --color=auto'
 alias l='ls -CF'
