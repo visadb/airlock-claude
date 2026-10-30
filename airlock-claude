@@ -11,13 +11,16 @@ Usage: airlock-claude [-M|--no-monitor] [-T|--no-tmux] [-r|--rebuild]
 
 Runs Claude Code sandboxed in an airlock VM in the current directory, with
 network access denied by default. On a project's first run airlock's
-setup wizard asks which packs or template to use: pick alpine and claude, or a
-template built on them.
+setup wizard asks which packs or template to use: pick alpine, claude and
+airlock-claude (local), or a template built on them.
+
+The airlock-claude pack installs tmux into the sandbox and writes the tmux
+config, Claude Code's managed settings (bypass permissions) and managed
+CLAUDE.md under /etc. Run from its repository checkout, this script copies
+the pack to ~/.airlock/packs/airlock-claude, updating it when it changes;
+run from anywhere else, it needs that copy to be there already.
 
 The session runs inside tmux, under airlock's monitor TUI, by default.
-Before it starts, tmux is installed into the sandbox if missing, and the
-tmux config, Claude Code's managed settings (bypass permissions) and
-managed CLAUDE.md are written under /etc.
 
 When the session ends, the last lines of its output are printed again —
 the monitor and tmux restore the host screen on exit, taking the session's
@@ -111,6 +114,46 @@ require_airlock() {
     echo "airlock-claude: airlock not found in PATH" >&2
     return 1
   fi
+}
+
+own_pack_dir() {
+  local script=$1
+  local link dir
+  while link=$(readlink -- "$script"); do
+    [[ $link == /* || $script != */* ]] || link=${script%/*}/$link
+    script=$link
+  done
+  if [[ $script == */* ]]; then dir=${script%/*}; else dir=.; fi
+  dir=$(CDPATH= cd -- "${dir:-/}" 2>/dev/null && pwd) || return 0
+  [[ -f $dir/packs/airlock-claude/pack.toml ]] && printf '%s\n' "$dir/packs/airlock-claude"
+  return 0
+}
+
+install_user_pack() {
+  local own_pack=$1 user_pack=$2
+  local file
+  if [[ -z $own_pack ]]; then
+    [[ -f $user_pack/pack.toml && ! -L $user_pack ]] && return 0
+    echo "airlock-claude: the airlock-claude pack is not installed in $user_pack: run airlock-claude once from its repository checkout, which installs it" >&2
+    return 1
+  fi
+  if [[ -L $user_pack || ( -e $user_pack && ! -d $user_pack ) ]]; then
+    rm -f -- "$user_pack" || { echo "airlock-claude: could not replace $user_pack" >&2; return 1; }
+  fi
+  mkdir -p -- "$user_pack" || { echo "airlock-claude: could not create $user_pack" >&2; return 1; }
+  for file in "$user_pack"/*; do
+    [[ -e $file || -L $file ]] || continue
+    [[ -f $own_pack/${file##*/} ]] && continue
+    rm -rf -- "$file" || { echo "airlock-claude: could not remove $file" >&2; return 1; }
+  done
+  for file in "$own_pack"/*; do
+    [[ -f $file ]] || continue
+    cmp -s -- "$file" "$user_pack/${file##*/}" && continue
+    rm -rf -- "$user_pack/${file##*/}" && cp -- "$file" "$user_pack/${file##*/}" || {
+      echo "airlock-claude: could not copy $file to $user_pack" >&2
+      return 1
+    }
+  done
 }
 
 resolve_extra_mount() {
@@ -211,6 +254,23 @@ refuse_config_without_sandbox() {
   fi
 }
 
+refuse_sandbox_without_pack() {
+  local rebuild=$1 sandbox=$2 has_config=$3
+  local config
+  [[ -z $has_config && ( -n $rebuild || -z $sandbox ) ]] && return 0
+  config=$(airlock config --format json) || {
+    echo "airlock-claude: airlock config failed, so the sandbox could not be checked for the airlock-claude pack" >&2
+    return 1
+  }
+  [[ $config == *'"~airlock-claude":'* ]] && return 0
+  if [[ -n $has_config ]]; then
+    echo "airlock-claude: the project's config does not select the airlock-claude pack: add \"~airlock-claude\" = {} under [packs] in airlock.local.toml" >&2
+  else
+    echo "airlock-claude: this sandbox was set up without the airlock-claude pack: run airlock-claude -r and select airlock-claude (local) in the setup wizard" >&2
+  fi
+  return 1
+}
+
 remove_sandbox_on_rebuild() {
   local rebuild=$1
   [[ -n $rebuild ]] || return 0
@@ -293,115 +353,12 @@ keep_previous_pty_dump() {
 
 session_script() {
   local use_tmux=$1 remote_control=$2
-  if [[ -n $use_tmux ]]; then
-    cat <<'TMUX_INSTALL'
-command -v tmux >/dev/null 2>&1 || apk add --quiet tmux || exit 1
-TMUX_INSTALL
-  fi
-  cat <<'PRELUDE'
-cat > /etc/tmux.conf <<'TMUX_CONF'
-set -g mouse on
-set -g set-clipboard on
-set -as terminal-features ",*:clipboard"
-set -g default-terminal "tmux-256color"
-set -g base-index 1
-TMUX_CONF
-mkdir -p /etc/bash
-cat > /etc/bash/ls-aliases.sh <<'LS_ALIASES'
-alias ls='ls --color=auto'
-alias l='ls -CF'
-alias la='ls -A'
-alias ll='ls -lh'
-alias lll='ls -lha'
-LS_ALIASES
-sed -i 's#^\(root:.*:\)/bin/sh$#\1/bin/bash#' /etc/passwd
-mkdir -p /etc/claude-code
-cat > /etc/claude-code/managed-settings.json <<'SETTINGS'
-{
-  "permissions": { "defaultMode": "bypassPermissions" },
-  "skipDangerousModePermissionPrompt": true
-}
-SETTINGS
-cat > /etc/claude-code/CLAUDE.md <<'CLAUDE_MD'
-# Sandbox notes (airlock-claude)
-
-This session runs inside an airlock VM. Outbound network access is denied
-except for allowlisted hosts, and the HTTPS traffic that is allowed goes
-through the airlock TLS proxy, which re-signs every host with its own
-"airlock CA". The system trust store already includes that CA, so curl,
-git and pip work unchanged.
-
-An HTTP request the policy denies is answered by the proxy itself with
-403 Forbidden and the body "denied by network policy" (one line). That
-response means the airlock policy blocked the request, not that the
-remote server refused it.
-
-## Blocked traffic can be allowed interactively
-
-The user can usually enable traffic that does not match the allow/deny
-rules of the airlock policy, temporarily and interactively, from outside
-the session. If network access beyond the allowlist would be important
-for the task, ask the user to allow the traffic instead of working
-around the block. When they do, remind them to revert the airlock
-network policy once the part of the work that needed the extra access
-is done.
-
-## Alpine Linux
-
-The sandbox is Alpine Linux on musl, not glibc. Install packages with
-apk add; the Alpine package mirrors are allowed under the network policy.
-A prebuilt binary built for glibc does not run here: look for a musl
-build or for the apk package instead.
-
-## Python HTTPS fails with "Missing Authority Key Identifier"
-
-Every Python HTTPS client fails certificate verification here: urllib,
-http.client, urllib3, requests, httpx and aiohttp all raise
-CERTIFICATE_VERIFY_FAILED with "Missing Authority Key Identifier" (requests
-and httpx may say "unable to get local issuer certificate" first). Python
-3.13+ turns on VERIFY_X509_STRICT by default, and the per-host certificates
-the proxy issues carry no Authority Key Identifier extension, so strict
-checking rejects them. SSL_CERT_FILE and REQUESTS_CA_BUNDLE do not help.
-
-Fix: build one SSL context with strict checking off and pass it explicitly.
-Verification itself stays on; do not use verify=False or CERT_NONE.
-
-    import ssl
-    ctx = ssl.create_default_context()
-    ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
-
-    urllib.request.urlopen(url, context=ctx)
-    http.client.HTTPSConnection(host, context=ctx)
-    urllib3.PoolManager(ssl_context=ctx)
-    httpx.get(url, verify=ctx)            # or httpx.Client(verify=ctx)
-    session.get(url, ssl=ctx)             # aiohttp
-
-    class Adapter(requests.adapters.HTTPAdapter):    # requests
-        def init_poolmanager(self, *args, **kwargs):
-            kwargs["ssl_context"] = ctx
-            return super().init_poolmanager(*args, **kwargs)
-    s = requests.Session(); s.mount("https://", Adapter())
-
-For a one-off download, curl works without any of this.
-
-## Virtualenvs you find here belong to the host
-
-The working directory is shared with the host, so any .venv, venv or other
-virtualenv already in it was almost certainly created on the host, with a
-different Python at a different path. Its interpreter symlinks, pyvenv.cfg
-and compiled wheels will not match this sandbox. Never activate, reuse,
-delete or overwrite a virtualenv you did not create in this session. Make
-your own under a different name, for example python3 -m venv .venv-airlock,
-and leave the existing one alone.
-
-## Describe the present only
-
-When you write or change comments or documentation, describe how things
-are now. Never add notes about how something used to work, what an
-approach replaced, or why an old way is gone. That history belongs in
-the commit message, and nowhere else.
-CLAUDE_MD
-PRELUDE
+  cat <<'PACK_CHECK'
+if [ ! -f /etc/claude-code/managed-settings.json ]; then
+  echo "airlock-claude: this sandbox has no airlock-claude pack install: run airlock-claude -r and select airlock-claude (local) in the setup wizard" >&2
+  exit 1
+fi
+PACK_CHECK
   if [[ -n $remote_control ]]; then
     cat <<'REMOTE_CONTROL'
 unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
@@ -449,8 +406,11 @@ validate_exec_usage "$EXEC" "${#CLAUDE_ARGS[@]}" || exit $?
 
 require_airlock || exit 1
 
+install_user_pack "$(own_pack_dir "${BASH_SOURCE[0]}")" "$HOME/.airlock/packs/airlock-claude" || exit 1
+
 resolve_extra_mounts || exit $?
 refuse_config_without_sandbox "${#MOUNT_SOURCES[@]}" "$REMOTE_CONTROL" "$REBUILD" "$(sandbox_dir)" "$(project_config_present)" || exit $?
+refuse_sandbox_without_pack "$REBUILD" "$(sandbox_dir)" "$(project_config_present)" || exit 1
 
 remove_sandbox_on_rebuild "$REBUILD" || exit 1
 

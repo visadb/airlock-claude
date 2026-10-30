@@ -4,14 +4,16 @@ Guidance for coding agents working in this repository.
 
 ## What it is
 
-A single-file launcher, `airlock-claude`, that runs Claude Code sandboxed
-in an `airlock` VM in any directory, built on airlock's packs and
-templates. It builds nothing and writes no config but its one marked block:
-airlock's setup wizard picks the packs (or a template) on a project's
-first start, the script imposes the deny-by-default policy on the launch
-line, and a short bash prelude prepares the sandbox before every session.
-The shipped artifact is that one script. `test-airlock-claude` is its
-suite.
+A launcher, `airlock-claude`, that runs Claude Code sandboxed in an
+`airlock` VM in any directory, built on airlock's packs and templates,
+and a user pack of its own, `packs/airlock-claude`, that prepares the
+sandbox. The script builds nothing and writes no project config but its
+one marked block: airlock's setup wizard picks the packs (or a template)
+on a project's first start, the airlock-claude pack among them; the script
+installs that pack into `~/.airlock/packs`, imposes the deny-by-default
+policy on the launch line, and hands off to the session with a few lines
+of bash. The shipped artifacts are the script and the pack.
+`test-airlock-claude` is their suite.
 
 ## Where the reasoning lives
 
@@ -30,11 +32,15 @@ data-flow diagram:
 parse_args "$@"                      sets MONITOR, USE_TMUX, EXEC, REBUILD, REMOTE_CONTROL, SHOW_USAGE, CLAUDE_ARGS, MOUNTS_RW, MOUNTS_RO
 validate_exec_usage <exec> <count>   -x needs a command after --
 require_airlock
+own_pack_dir <script>                -> packs/airlock-claude beside the script, symlinks followed, or nothing
+install_user_pack <own_pack> <user_pack>  copies the pack into ~/.airlock/packs, or checks the copy is there
 resolve_extra_mounts                 sets MOUNT_SOURCES, MOUNT_TARGETS, MOUNT_READ_ONLY (the array exemption)
 without_config_block <file>          -> the file minus the block (1: unreadable, 2: no END line)
 project_config_present               -> 1 if the project has config the wizard would respect, or nothing
 sandbox_dir                          -> the sandbox directory `airlock info` reports, or nothing
 refuse_config_without_sandbox <count> <remote_control> <rebuild> <sandbox_dir> <has_config>
+sandbox_dir, project_config_present  again, for the pack check
+refuse_sandbox_without_pack <rebuild> <sandbox_dir> <has_config>  `airlock config` must select ~airlock-claude
 remove_sandbox_on_rebuild <rebuild>  `airlock remove --force`
 extra_mounts_config                  -> the [mounts] tables, or nothing (reads the arrays)
 sandbox_dir                          again, for -c's Claude Code directory
@@ -153,39 +159,73 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   every sandbox with the pack, other sandboxes would read them and,
   with the service still on, have every API call refused. The sandbox
   directory belongs to this sandbox alone, and `airlock remove` deletes
-  it, login included. The prelude unsets
+  it, login included. The session script unsets
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, which the pack sets and
-  which hides `/remote-control`; it is unset in the prelude rather than
-  set in the block because an `[env]` table in the block would collide
-  with one in a hand-written `airlock.local.toml`.
+  which hides `/remote-control`; it is unset there rather than set in the
+  block because an `[env]` table in the block would collide with one in a
+  hand-written `airlock.local.toml`, and not in the airlock-claude pack
+  because a pack's config can set a variable but not unset one, and `-c`
+  is chosen per run.
 - **`sandbox_dir` parses `airlock info --json` with `sed`, not `jq`**,
   because the host isn't guaranteed to have `jq`, and the pretty-printed
   JSON puts `"dir"` on a line of its own. It is called twice: before the
   launch for the rotation (a project with no sandbox yet yields nothing)
   and after, when a first run has a sandbox at last. Its stderr is
   silenced — "No sandbox for …" is the expected answer on a first run.
-- **`session_script` builds the prelude on the host and the launch line
-  passes it as the one argument of `bash -c`**, with `airlock-claude` as
-  the script's `$0` and the session command as its `"$@"`. Nothing is
-  written into the project directory.
-- **The prelude runs on every launch and is idempotent.** airlock
-  re-creates the sandbox disk by itself when the image or the packs
-  change, and a sandbox made by a plain `airlock start` has no tmux
-  either; a "did the sandbox exist before" check on the host would miss
-  both and launch a tmux that is not there. Instead: `command -v tmux ||
-  apk add tmux`, and the files under `/etc` are rewritten each time (one
-  heredoc each), so a changed text in a newer script reaches an existing
-  sandbox without a `-r`. The tmux install is skipped under `-T`, and a
-  failed install exits 1 before tmux is launched, so apk's own error is
-  what the user sees rather than "tmux: not found". The `alpine` pack's
-  `allow-apk` (default on) is what lets `apk add` through deny-by-default.
+- **The sandbox is prepared by a user pack, `packs/airlock-claude`, not
+  by the launch.** Its `setup.sh` installs tmux and writes the files under
+  `/etc` in airlock's install boot, once per sandbox disk and again
+  whenever the pack changes; airlock then asks once whether to re-create
+  the sandbox, reinstall on top or keep the old install. The script is
+  POSIX `sh`, as airlock requires, and idempotent, as airlock requires of a
+  script it reruns after a failure or under "Reinstall on top". Its kind
+  is `other`, so airlock installs it after the `alpine` and `claude`
+  packs and `bash` is there for the root-shell step. It supports Alpine
+  only (exit 10 elsewhere): the ls aliases rely on Alpine's
+  `/etc/bash/bashrc`, and the managed `CLAUDE.md` describes Alpine. The
+  pack is `pack.toml` and `setup.sh` only; with no `config.lua` airlock
+  needs no approval for it. tmux is installed whatever `-T` says, since
+  the flag is chosen per run and the pack per sandbox.
+- **The pack is copied into `~/.airlock/packs`, not symlinked.** airlock
+  skips a symlink in a user pack directory with a warning ("links are
+  not allowed"), and requires each pack file to be a regular file.
+  `own_pack_dir` follows the script's own symlinks with plain `readlink`
+  in a loop (`readlink -f` is missing from older macOS, `greadlink` from
+  a Mac without coreutils) and looks for `packs/airlock-claude/pack.toml`
+  beside the real file. Found, `install_user_pack` mirrors it: it replaces
+  a symlink or file where the pack directory should be, removes entries
+  the checkout's pack lacks, and copies each file that differs (`cmp`),
+  leaving unchanged files untouched so airlock sees no change. Not found
+  — a copy of the script outside a checkout — it requires the installed
+  pack to be there and leaves it alone. The path is airlock's default
+  user pack directory; a `packs.dirs` setting that drops the default
+  would hide the pack. Installing runs after `require_airlock`, so a
+  machine without airlock gets nothing written into its home directory.
+- **`refuse_sandbox_without_pack` reads `airlock config --format json`**,
+  the project config as the sandbox will start with it (project files and
+  the wizard's local config, without packs resolved, so it needs no pack
+  approval), and looks for the `"~airlock-claude":` key the wizard writes
+  under `"packs"`. It skips the check when the wizard is about to run (no
+  project config, and no sandbox or `-r`), since the wizard is where the
+  pack gets picked. It runs before `remove_sandbox_on_rebuild`, so `-r` on
+  a project config that lacks the pack refuses before destroying
+  anything. A failing `airlock config` aborts the launch rather than being
+  read as "no pack".
+- **`session_script` builds a short script on the host and the launch
+  line passes it as the one argument of `bash -c`**, with
+  `airlock-claude` as the script's `$0` and the session command as its
+  `"$@"`. Nothing is written into the project directory. It first checks
+  for `/etc/claude-code/managed-settings.json`, the pack's last write,
+  and stops with a message if it is missing: a first run whose wizard
+  pick left out the pack, or a failed pack install, would otherwise start
+  Claude Code without bypass permissions or fail on a missing tmux.
 - **The wrapper is `bash -c`, not `sh -c`, because of `printf '%q '`.**
   tmux runs its command through a shell only when it receives a single
   command argument (given several words it calls `execvp` directly), and
   the handoff passes one string so the path is the same for every command.
   `printf '%q '` re-quotes each word for that shell, so a multi-word
   `-p "run the tests"` stays one word. The shell that reads the string is
-  tmux's `default-shell`, root's login shell, which the prelude makes
+  tmux's `default-shell`, root's login shell, which the pack makes
   `bash`; a word containing a newline, which `%q` writes as `$'…'`, needs
   a shell that understands `$'…'`, and both `bash` and busybox `ash`
   do. The `claude` pack installs `bash` on Alpine, so the wrapper is
@@ -205,11 +245,8 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   `VERIFY_X509_STRICT` workaround (airlock's per-host leaf certificates
   carry no Authority Key Identifier; `pip` and `curl` are unaffected), to
   leave host-made virtualenvs alone, and to describe the present only.
-- **The prelude is a quoted heredoc on the host, and the files it writes
-  are quoted heredocs inside it with other delimiters.** Quotes,
-  apostrophes and `$` in the content pass through both layers untouched.
-  The suite extracts the script from the launch argv and runs `bash -n` on
-  it.
+- **Each file `setup.sh` writes is one quoted heredoc**, so quotes,
+  apostrophes and `$` in the content pass through untouched.
 - **`/etc/tmux.conf` sets `mouse on`, `set-clipboard on`, a
   `terminal-features` entry asserting OSC 52 for every terminal,
   `default-terminal "tmux-256color"` and `base-index 1`.** `base-index 1`
@@ -223,7 +260,7 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   box-drawing intact if that ever changes.
 - **The `ls` aliases are `/etc/bash/ls-aliases.sh`.** Alpine's
   `/etc/bash/bashrc` sources `/etc/bash/*.sh` in every interactive bash,
-  so a file of the script's own there needs no edit to a file the system
+  so a file of the pack's own there needs no edit to a file the system
   owns. `ls` carries `--color=auto` (busybox `ls` understands it), and
   `l`, `la`, `ll`, `lll` are written as plain `ls` so they pick up the
   colour through that alias.
@@ -231,8 +268,9 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   (busybox `ash`), which reads nothing under `/etc/bash`. No `SHELL`
   reaches the tmux server, so tmux takes its `default-shell` from
   `/etc/passwd`, and a new window or pane opens root's login shell. The
-  prelude's `sed` rewrites only a root entry ending in `/bin/sh`, so it is
-  idempotent and leaves a shell someone chose by hand alone.
+  pack's `sed` rewrites only a root entry ending in `/bin/sh`, and only
+  when `/bin/bash` exists, so it is idempotent, never leaves root without
+  a shell, and leaves a shell someone chose by hand alone.
 - **`AIRLOCK_PTY_DUMP=1` is an env prefix on the launch line.** It is read
   by the airlock CLI on the host, which writes every byte of the guest
   pty to `pty.dump` in the sandbox directory, truncating at each start.
@@ -283,14 +321,17 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
   needs no `airlock`, no network, and finishes in about a second. `-v`
   echoes each case's captured output. Add cases in the same shape when
   you add behavior.
-- What the suite cannot reach: anything that boots a VM. The prelude
-  reaches `bash -c` as a file, parses under `bash -n`, and is run against
-  a substitute `/etc`, where the suite checks the files it writes and the
-  `exec` it ends with. Only `apk add tmux`, tmux itself and airlock's
-  acceptance of the launch remain outside the suite. For those, run
-  `./airlock-claude` on a machine with the `airlock` CLI.
-- `README.md` is the user-facing description. A change to flags or the
-  launch line usually needs an edit there too.
+- What the suite cannot reach: anything that boots a VM. The session
+  script reaches `bash -c` as a file, parses under `bash -n`, and is run
+  against a substitute `/etc`. `setup.sh` is run under `sh` against a
+  substitute `/etc` with stand-ins for airlock's `airlock_*` functions and
+  `DISTRO`, where the suite checks the files it writes, the step count,
+  the exit codes and that a second run changes nothing. airlock's loading
+  of the pack, its install boot, `apk add tmux`, tmux itself and
+  airlock's acceptance of the launch remain outside the suite. For those,
+  run `./airlock-claude` on a machine with the `airlock` CLI.
+- `README.md` is the user-facing description. A change to flags, the
+  launch line or the pack usually needs an edit there too.
 
 ## Working on the test suite
 
@@ -306,11 +347,19 @@ print_pty_dump_tail <dump> <max>     -> the session's last lines, escape-strippe
 - **The stub writes the `bash -c` script argument to
   `$CASE_DIR/session-script`** (the `SESSION_SCRIPT` helper names it) and
   logs the argv with the script replaced by `<script>`, so launch
-  assertions stay one line and the prelude is checked as a file. Only the
-  first `-c` is taken, so a forwarded `sh -c …` isn't mistaken for it.
+  assertions stay one line and the session script is checked as a file.
+  Only the first `-c` is taken, so a forwarded `sh -c …` isn't mistaken
+  for it.
+- **The stub's `config` answers with pretty-printed JSON whose `packs`
+  include `~airlock-claude`**, unless `STUB_NO_PACK` is set; every case
+  with a sandbox goes through the pack check.
+- **`HOME` is the case's `FAKE_HOME`, so the pack is installed into
+  `$FAKE_HOME/.airlock/packs`** (the `USER_PACK` helper names it).
+  `run_script` runs the checkout's script; `run_script_at` runs another
+  path, such as a symlink to it or a copy outside the checkout.
 - **Stubs read their behavior from exported env vars** (`STUB_PTY_DUMP`,
-  `STUB_EXIT`, `STUB_REMOVE_EXIT`, `STUB_NO_SANDBOX`, `DUMP_ARGV`), reset
-  in `new_case`.
+  `STUB_EXIT`, `STUB_REMOVE_EXIT`, `STUB_NO_SANDBOX`, `STUB_NO_PACK`,
+  `STUB_CONFIG_EXIT`, `DUMP_ARGV`), reset in `new_case`.
 - **The `CONFIG` helper names `airlock.local.toml` in the case's work
   directory; the stub's `remove` deletes only the pretend sandbox, as the
   real one does, so the suite can assert what the script itself does to

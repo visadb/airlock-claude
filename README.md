@@ -2,17 +2,34 @@
 
 Run Claude Code sandboxed in
 [airlock](https://github.com/milankinen/airlock), in any directory, on top
-of airlock's own packs and templates. Copy this one script anywhere on your
-`PATH`; it starts the project's sandbox with network access denied by
-default and drops you into a Claude Code session inside tmux.
+of airlock's own packs and templates plus one user pack of its own. The
+script starts the project's sandbox with network access denied by default
+and drops you into a Claude Code session inside tmux.
 
 ## Prerequisites
 
-- [`airlock`](https://github.com/milankinen/airlock), a version with packs
-  and templates (`airlock templates` exists).
+- [`airlock`](https://github.com/milankinen/airlock) v2026.10.5 or newer
+  (user packs).
 - Nothing else: no container engine, no image build. The sandbox is
-  airlock's `alpine` pack plus its `claude` pack, or a template built from
-  them.
+  airlock's `alpine` and `claude` packs plus this repository's
+  `airlock-claude` pack, or a template built from them.
+
+## Install
+
+Clone this repository and put a symlink to its `airlock-claude` on your
+`PATH`, for example:
+
+```sh
+ln -s ~/src/airlock-claude/airlock-claude ~/.local/bin/airlock-claude
+```
+
+Run from the checkout (directly or through such a symlink), the script
+copies `packs/airlock-claude` to `~/.airlock/packs/airlock-claude` on every
+run, updating the copy when the checkout's pack has changed. airlock
+doesn't follow a symlinked pack, so it has to be a copy. A copy of the
+script outside a checkout needs that installed pack and stops if it is
+missing. If you set `packs.dirs` in `~/.airlock/settings.toml`, keep
+`~/.airlock/packs` in it.
 
 ## Usage
 
@@ -23,11 +40,15 @@ airlock-claude
 ```
 
 **First run in a project.** airlock's setup wizard appears. Select
-`alpine` as the base image and `claude` under coding agents, or select a
-template if you have one, then `start`. airlock installs the packs onto
-the sandbox disk (a minute or two) and the session begins. Later runs
-skip the wizard. The wizard needs a terminal, so run a project's first
-session interactively before scripting `-p` runs in it.
+`alpine` as the base image, `claude` under coding agents and
+`airlock-claude (local)`, or select a template built with them, then
+`start`. airlock installs the packs onto the sandbox disk (a minute or two)
+and the session begins. Later runs skip the wizard. The wizard needs a
+terminal, so run a project's first session interactively before scripting
+`-p` runs in it. A sandbox set up without the `airlock-claude` pack is
+refused at launch, with a pointer to `-r`. In a project whose own
+`airlock.toml` keeps the wizard away, add `"~airlock-claude" = {}` under
+`[packs]` in `airlock.local.toml` instead.
 
 **Templates.** `airlock templates create <name>` runs the same wizard
 once and keeps the result; a sandbox made from the template starts at
@@ -67,15 +88,15 @@ airlock-claude -x -- bash               # a sandboxed shell, no claude
 
 ## Things to know
 
-**What runs before the session.** Every launch first runs a short script
-inside the sandbox: it installs tmux with `apk add` if it is missing (unless
-`-T`), writes `/etc/tmux.conf` (mouse on, copies go to the host clipboard,
-windows numbered from 1), makes `bash` root's login shell, so new tmux
-windows open bash, writes `/etc/bash/ls-aliases.sh` (coloured `ls` and `l`,
-`la`, `ll`, `lll`), and writes Claude Code's managed settings (bypass
-permissions) and managed `CLAUDE.md` under `/etc/claude-code`. The files are
-rewritten on every launch, so a newer script reaches an existing sandbox
-without `-r`, and a sandbox airlock re-created behind your back heals itself.
+**The airlock-claude pack.** When airlock installs the sandbox, the pack
+installs tmux, writes `/etc/tmux.conf` (mouse on, copies go to the host
+clipboard, windows numbered from 1), makes `bash` root's login shell, so
+new tmux windows open bash, writes `/etc/bash/ls-aliases.sh` (coloured
+`ls` and `l`, `la`, `ll`, `lll`), and writes Claude Code's managed settings
+(bypass permissions) and managed `CLAUDE.md` under `/etc/claude-code`. It
+supports Alpine only. When the pack changes, for example after a
+`git pull`, the next start asks once what to do with the sandbox:
+"Reinstall on top" brings the change in and keeps everything else.
 
 **tmux.** The session runs inside tmux, so you can split a pane and have a
 shell next to Claude Code without leaving the sandbox. Detaching
@@ -146,7 +167,8 @@ session the per-client workaround, how to recognise a network-policy
 denial, that packages come from `apk`, and to leave host-made virtualenvs
 alone.
 
-Apart from that marked block, the script writes no config. The wizard's
+Apart from that marked block and the pack it copies into
+`~/.airlock/packs`, the script writes no config. The wizard's
 answers live in the sandbox directory, and `airlock remove` deletes them
 with it; a project's own `airlock.toml` applies as usual.
 

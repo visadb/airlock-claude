@@ -62,7 +62,7 @@ assert_absent() {
 
 TOOLS=$TMPROOT/tools
 mkdir -p "$TOOLS"
-for t in sed tail cat tr mv rm mkdir; do
+for t in sed tail cat tr mv rm mkdir readlink cmp cp; do
   p=$(command -v "$t") || { echo "required tool not found: $t" >&2; exit 1; }
   ln -s "$p" "$TOOLS/$t"
 done
@@ -77,7 +77,7 @@ new_case() {
   mkdir -p "$BIN" "$WORK" "$FAKE_HOME"
   : > "$LOG"
   export LOG CASE_DIR STUB_BOX
-  export DUMP_ARGV= STUB_PTY_DUMP= STUB_EXIT= STUB_REMOVE_EXIT= STUB_NO_SANDBOX=
+  export DUMP_ARGV= STUB_PTY_DUMP= STUB_EXIT= STUB_REMOVE_EXIT= STUB_NO_SANDBOX= STUB_NO_PACK= STUB_CONFIG_EXIT=
   RC=0
 }
 
@@ -91,6 +91,13 @@ case "$1" in
       exit 1
     fi
     printf '{\n  "id": "k3x7q2ma",\n  "location": "data-dir",\n  "project": "%s",\n  "dir": "%s",\n  "status": "stopped"\n}\n' "$PWD" "$STUB_BOX"
+    exit 0 ;;
+  config)
+    echo "CONFIG: $*" >> "$LOG"
+    [ -z "${STUB_CONFIG_EXIT:-}" ] || exit "$STUB_CONFIG_EXIT"
+    printf '{\n  "packs": {\n    "alpine": {\n      "version": "1"\n    },\n'
+    [ -n "${STUB_NO_PACK:-}" ] || printf '    "~airlock-claude": {},\n'
+    printf '    "claude": {\n      "version": "1"\n    }\n  }\n}\n'
     exit 0 ;;
   remove)
     echo "REMOVE: $*" >> "$LOG"
@@ -124,9 +131,12 @@ EOF
 stub_all() { stub_airlock; }
 stub_all_but_airlock() { :; }
 
-run_script() {
+run_script() { run_script_at "$SCRIPT" "$@"; }
+
+run_script_at() {
+  local script=$1; shift
   ( cd "$WORK" && PATH="$BIN:$TOOLS" HOME="$FAKE_HOME" \
-      "$SCRIPT" "$@" > "$CASE_DIR/out" 2> "$CASE_DIR/err" )
+      "$script" "$@" > "$CASE_DIR/out" 2> "$CASE_DIR/err" )
   RC=$?
   if [ -n "$VERBOSE" ]; then
     [ -s "$CASE_DIR/out" ] && sed 's/^/        out: /' "$CASE_DIR/out"
@@ -298,46 +308,65 @@ if bash -n "$(SESSION_SCRIPT)" 2>"$CASE_DIR/ss.err"; then
 else
   fail "the sandbox-side script parses under bash -n" "$(cat "$CASE_DIR/ss.err")"
 fi
-assert_eq 'command -v tmux >/dev/null 2>&1 || apk add --quiet tmux || exit 1' \
-  "$(sed -n 1p "$(SESSION_SCRIPT)")" "tmux is installed first, only if missing, and a failed install stops the session"
-assert_grep "^cat > /etc/tmux.conf <<" "$(SESSION_SCRIPT)" "the system tmux config is written on every launch"
-assert_grep "^set -g mouse on$" "$(SESSION_SCRIPT)" "tmux config turns the mouse on"
-assert_grep "^set -g set-clipboard on$" "$(SESSION_SCRIPT)" "tmux config forwards copies to the host clipboard"
-assert_grep '^set -as terminal-features ",\*:clipboard"$' "$(SESSION_SCRIPT)" "tmux config asserts OSC 52 support for every terminal"
-assert_grep '^set -g default-terminal "tmux-256color"$' "$(SESSION_SCRIPT)" "tmux config keeps 256 colours"
-assert_grep "^set -g base-index 1$" "$(SESSION_SCRIPT)" "tmux numbers windows from 1"
-assert_grep "^mkdir -p /etc/claude-code$" "$(SESSION_SCRIPT)" "the managed Claude Code directory is created"
-assert_grep "^cat > /etc/claude-code/managed-settings.json <<" "$(SESSION_SCRIPT)" "the managed settings are written on every launch"
-assert_grep '"defaultMode": "bypassPermissions"' "$(SESSION_SCRIPT)" "managed settings bypass permission prompts"
-assert_grep '"skipDangerousModePermissionPrompt": true' "$(SESSION_SCRIPT)" "managed settings pre-accept the bypass warning"
-assert_grep "^cat > /etc/claude-code/CLAUDE.md <<" "$(SESSION_SCRIPT)" "the managed memory is written on every launch"
-assert_grep "denied by network policy" "$(SESSION_SCRIPT)" "managed memory describes the 403 the proxy answers denied requests with"
-assert_grep "remind them to revert the airlock" "$(SESSION_SCRIPT)" "managed memory tells Claude Code it can ask for temporary network access"
-assert_grep "Alpine Linux on musl" "$(SESSION_SCRIPT)" "managed memory says the sandbox is Alpine on musl and packages come from apk"
-assert_grep "VERIFY_X509_STRICT" "$(SESSION_SCRIPT)" "managed memory tells Claude Code how to get Python past the TLS proxy"
-assert_grep "delete or overwrite a virtualenv you did not create in this session" "$(SESSION_SCRIPT)" \
-  "managed memory keeps Claude Code out of the host's virtualenvs"
-assert_grep "Never add notes about how something used to work" "$(SESSION_SCRIPT)" "managed memory forbids history in comments and docs"
-assert_not_grep "nvm" "$(SESSION_SCRIPT)" "managed memory carries nothing about the old image's nvm"
+assert_eq 'if [ ! -f /etc/claude-code/managed-settings.json ]; then' "$(sed -n 1p "$(SESSION_SCRIPT)")" \
+  "the sandbox-side script first checks for the pack's install"
+assert_not_grep "apk add" "$(SESSION_SCRIPT)" "the sandbox-side script installs nothing; the pack does"
+assert_not_grep "/etc/tmux.conf" "$(SESSION_SCRIPT)" "the sandbox-side script writes no files; the pack does"
 assert_eq "1" "$(grep -c '^exec ' "$(SESSION_SCRIPT)")" "exactly one exec line hands off"
 
 new_case; stub_all
 run_script -T
-assert_not_grep "apk add --quiet tmux" "$(SESSION_SCRIPT)" "-T installs no tmux"
-assert_grep "^cat > /etc/tmux.conf <<" "$(SESSION_SCRIPT)" "-T still writes the tmux config, for a tmux started by hand"
-assert_grep "/etc/claude-code/CLAUDE.md" "$(SESSION_SCRIPT)" "-T still writes the managed memory"
-assert_eq 'exec "$@"' "$(tail -n 1 "$(SESSION_SCRIPT)")" "-T ends with a plain exec"
+mkdir -p "$CASE_DIR/etc"
+bash -c "$(sed "s#/etc/#$CASE_DIR/etc/#g" "$(SESSION_SCRIPT)")" airlock-claude sh -c 'echo reached' > "$CASE_DIR/session.out" 2>&1
+assert_rc 1 "$?" "a sandbox without the pack's install stops before the handoff"
+assert_grep "select airlock-claude (local) in the setup wizard" "$CASE_DIR/session.out" \
+  "a sandbox without the pack's install says how to get it"
+assert_not_grep "^reached$" "$CASE_DIR/session.out" "a sandbox without the pack's install never runs the command"
 
 new_case; stub_all
 run_script -T
-mkdir -p "$CASE_DIR/etc"
-printf '%s\n' 'root:x:0:0:root:/root:/bin/sh' 'bin:x:1:1:bin:/bin:/sbin/nologin' > "$CASE_DIR/etc/passwd"
-sed "s#/etc/#$CASE_DIR/etc/#g" "$(SESSION_SCRIPT)" > "$CASE_DIR/prelude"
-bash -c "$(cat "$CASE_DIR/prelude")" airlock-claude true > "$CASE_DIR/prelude.out" 2>&1
-assert_rc 0 "$?" "running the prelude against a substitute /etc succeeds and reaches the handoff"
-assert_exists "$CASE_DIR/etc/tmux.conf" "running the prelude writes the tmux config"
-assert_exists "$CASE_DIR/etc/claude-code/managed-settings.json" "running the prelude writes the managed settings"
-assert_exists "$CASE_DIR/etc/claude-code/CLAUDE.md" "running the prelude writes the managed memory"
+mkdir -p "$CASE_DIR/etc/claude-code"; : > "$CASE_DIR/etc/claude-code/managed-settings.json"
+bash -c "$(sed "s#/etc/#$CASE_DIR/etc/#g" "$(SESSION_SCRIPT)")" airlock-claude sh -c 'echo reached' > "$CASE_DIR/session.out" 2>&1
+assert_rc 0 "$?" "a sandbox with the pack's install reaches the handoff"
+assert_eq "reached" "$(cat "$CASE_DIR/session.out")" "the handoff runs the command and nothing else prints"
+
+section "the pack"
+PACK_SRC=$SUITE_DIR/packs/airlock-claude
+assert_grep '^label = "airlock-claude"$' "$PACK_SRC/pack.toml" "the pack is labelled airlock-claude in the wizard"
+assert_grep '^kind = "other"$' "$PACK_SRC/pack.toml" "the pack's kind installs it after the distro and agent packs, so bash is there"
+assert_not_grep '^\[\[args\]\]' "$PACK_SRC/pack.toml" "the pack has no args"
+assert_eq "pack.toml setup.sh" "$(cd "$PACK_SRC" && echo *)" "the pack is pack.toml and setup.sh only, so it needs no approval"
+if sh -n "$PACK_SRC/setup.sh" 2>"$TMPROOT/setup.err"; then pass "setup.sh parses under sh -n"
+else fail "setup.sh parses under sh -n" "$(cat "$TMPROOT/setup.err")"; fi
+SETUP_SIZE=$(wc -c < "$PACK_SRC/setup.sh")
+if [ "$SETUP_SIZE" -le 102400 ]; then pass "setup.sh is within airlock's 100 KiB limit"
+else fail "setup.sh is within airlock's 100 KiB limit" "$SETUP_SIZE bytes"; fi
+
+SETUP_STUBS=$(cat <<'EOF'
+airlock_steps() { echo "STEPS $1" >> "$SETUP_LOG"; }
+airlock_status() { echo "STATUS $1" >> "$SETUP_LOG"; }
+airlock_log() { echo "LOG $1" >> "$SETUP_LOG"; }
+airlock_fail() { echo "FAIL $1 $2" >> "$SETUP_LOG"; exit "$1"; }
+airlock_pkg_install() { echo "INSTALL $*" >> "$SETUP_LOG"; [ -z "$STUB_PKG_FAIL" ]; }
+EOF
+)
+run_setup() {
+  local distro=$1 pkg_fail=${2:-}
+  mkdir -p "$CASE_DIR/etc"
+  [ -f "$CASE_DIR/etc/passwd" ] || \
+    printf '%s\n' 'root:x:0:0:root:/root:/bin/sh' 'bin:x:1:1:bin:/bin:/sbin/nologin' > "$CASE_DIR/etc/passwd"
+  : > "$CASE_DIR/setup.log"
+  DISTRO=$distro SETUP_LOG=$CASE_DIR/setup.log STUB_PKG_FAIL=$pkg_fail \
+    sh -c "$SETUP_STUBS
+$(sed "s#/etc/#$CASE_DIR/etc/#g" "$PACK_SRC/setup.sh")" > "$CASE_DIR/setup.out" 2>&1
+}
+
+new_case
+run_setup alpine
+assert_rc 0 "$?" "setup.sh succeeds against a substitute /etc"
+assert_grep "^INSTALL tmux$" "$CASE_DIR/setup.log" "setup.sh installs tmux"
+assert_eq "$(sed -n 's/^STEPS //p' "$CASE_DIR/setup.log")" "$(grep -c '^STATUS ' "$CASE_DIR/setup.log")" \
+  "setup.sh announces as many steps as it starts"
 EXPECTED_TMUX_CONF=$(cat <<'EOF'
 set -g mouse on
 set -g set-clipboard on
@@ -358,25 +387,177 @@ EOF
 assert_eq "$EXPECTED_LS_ALIASES" "$(cat "$CASE_DIR/etc/bash/ls-aliases.sh")" "interactive bash gets coloured ls and the l, la, ll, lll aliases"
 assert_eq "d" "$(bash -c "shopt -s expand_aliases; . '$CASE_DIR/etc/bash/ls-aliases.sh'
 ll -d '$CASE_DIR'" | cut -c1)" "the aliases parse and ll gives a long listing"
-assert_eq $'root:x:0:0:root:/root:/bin/bash\nbin:x:1:1:bin:/bin:/sbin/nologin' "$(cat "$CASE_DIR/etc/passwd")" \
-  "root's login shell becomes bash, so new tmux windows open bash, and no other entry changes"
+if [ -x /bin/bash ]; then
+  assert_eq $'root:x:0:0:root:/root:/bin/bash\nbin:x:1:1:bin:/bin:/sbin/nologin' "$(cat "$CASE_DIR/etc/passwd")" \
+    "root's login shell becomes bash, so new tmux windows open bash, and no other entry changes"
+fi
 assert_grep '"defaultMode": "bypassPermissions"' "$CASE_DIR/etc/claude-code/managed-settings.json" \
   "the written managed settings bypass permission prompts"
+assert_grep '"skipDangerousModePermissionPrompt": true' "$CASE_DIR/etc/claude-code/managed-settings.json" \
+  "the written managed settings pre-accept the bypass warning"
+assert_grep "denied by network policy" "$CASE_DIR/etc/claude-code/CLAUDE.md" \
+  "managed memory describes the 403 the proxy answers denied requests with"
+assert_grep "remind them to revert the airlock" "$CASE_DIR/etc/claude-code/CLAUDE.md" \
+  "managed memory tells Claude Code it can ask for temporary network access"
+assert_grep "Alpine Linux on musl" "$CASE_DIR/etc/claude-code/CLAUDE.md" \
+  "managed memory says the sandbox is Alpine on musl and packages come from apk"
+assert_grep "delete or overwrite a virtualenv you did not create in this session" "$CASE_DIR/etc/claude-code/CLAUDE.md" \
+  "managed memory keeps Claude Code out of the host's virtualenvs"
+assert_grep "Never add notes about how something used to work" "$CASE_DIR/etc/claude-code/CLAUDE.md" \
+  "managed memory forbids history in comments and docs"
 assert_grep 'ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT' "$CASE_DIR/etc/claude-code/CLAUDE.md" \
-  "the written memory keeps & and ~ through both heredoc layers"
+  "the written memory keeps & and ~ through the heredoc"
 assert_grep 'kwargs\["ssl_context"\] = ctx' "$CASE_DIR/etc/claude-code/CLAUDE.md" \
-  "the written memory keeps quotes and brackets through both heredoc layers"
+  "the written memory keeps quotes and brackets through the heredoc"
 assert_eq "the commit message, and nowhere else." "$(tail -n 1 "$CASE_DIR/etc/claude-code/CLAUDE.md")" \
   "the written memory runs to its last line, with nothing swallowed after it"
-assert_not_grep "^\(TMUX_CONF\|SETTINGS\|CLAUDE_MD\)$" "$CASE_DIR/etc/tmux.conf" "no heredoc terminator leaks into the tmux config"
-assert_not_grep "^\(LS_ALIASES\|TMUX_CONF\|SETTINGS\)$" "$CASE_DIR/etc/bash/ls-aliases.sh" "no heredoc terminator leaks into the ls aliases"
-assert_not_grep "^\(TMUX_CONF\|SETTINGS\|CLAUDE_MD\)$" "$CASE_DIR/etc/claude-code/managed-settings.json" "no heredoc terminator leaks into the managed settings"
-assert_not_grep "^\(TMUX_CONF\|SETTINGS\|CLAUDE_MD\)$" "$CASE_DIR/etc/claude-code/CLAUDE.md" "no heredoc terminator leaks into the managed memory"
+for written in tmux.conf bash/ls-aliases.sh claude-code/managed-settings.json claude-code/CLAUDE.md; do
+  assert_not_grep "^\(TMUX_CONF\|LS_ALIASES\|SETTINGS\|CLAUDE_MD\)$" "$CASE_DIR/etc/$written" \
+    "no heredoc terminator leaks into $written"
+done
+cp -R "$CASE_DIR/etc" "$CASE_DIR/etc.first"
+run_setup alpine
+assert_rc 0 "$?" "setup.sh runs again on its own install"
+if diff -r "$CASE_DIR/etc.first" "$CASE_DIR/etc" > /dev/null; then pass "a second run of setup.sh changes nothing"
+else fail "a second run of setup.sh changes nothing"; fi
+
+new_case
+mkdir -p "$CASE_DIR/etc"
+printf '%s\n' 'root:x:0:0:root:/root:/bin/zsh' > "$CASE_DIR/etc/passwd"
+run_setup alpine
+assert_eq "root:x:0:0:root:/root:/bin/zsh" "$(cat "$CASE_DIR/etc/passwd")" "a login shell chosen by hand is left alone"
+
+new_case
+run_setup debian
+assert_rc 10 "$?" "setup.sh refuses a distro other than Alpine with airlock's code for it"
+assert_absent "$CASE_DIR/etc/tmux.conf" "setup.sh on another distro writes nothing"
+
+new_case
+run_setup alpine 1
+assert_rc 11 "$?" "a failed tmux install fails the pack with airlock's code for it"
+assert_absent "$CASE_DIR/etc/claude-code/managed-settings.json" \
+  "a failed tmux install leaves no managed settings, so the session refuses to start on the half-install"
+
+section "installing the pack"
+USER_PACK() { echo "$FAKE_HOME/.airlock/packs/airlock-claude"; }
 
 new_case; stub_all
-run_script -x -- bash
-assert_grep "/etc/claude-code/managed-settings.json" "$(SESSION_SCRIPT)" "-x sessions get the same prelude"
-assert_grep "apk add --quiet tmux" "$(SESSION_SCRIPT)" "-x under tmux installs tmux too"
+run_script
+assert_rc 0 "$RC" "a run from the checkout exits 0"
+for file in pack.toml setup.sh; do
+  if cmp -s "$PACK_SRC/$file" "$(USER_PACK)/$file"; then pass "a run from the checkout installs $file into ~/.airlock/packs"
+  else fail "a run from the checkout installs $file into ~/.airlock/packs"; fi
+done
+if [ -d "$(USER_PACK)" ] && [ ! -L "$(USER_PACK)" ]; then pass "the installed pack is a real directory, since airlock skips links"
+else fail "the installed pack is a real directory, since airlock skips links"; fi
+
+new_case; stub_all
+run_script
+touch -t 200001010000 "$(USER_PACK)/pack.toml"
+printf 'stale\n' > "$(USER_PACK)/setup.sh"
+: > "$(USER_PACK)/config.lua"
+run_script
+if cmp -s "$PACK_SRC/setup.sh" "$(USER_PACK)/setup.sh"; then pass "a changed file in the installed pack is brought back in line"
+else fail "a changed file in the installed pack is brought back in line"; fi
+assert_absent "$(USER_PACK)/config.lua" "a file the checkout's pack lacks is removed from the installed pack"
+if [ "$(USER_PACK)/pack.toml" -ot "$(USER_PACK)/setup.sh" ]; then pass "an unchanged file is not rewritten"
+else fail "an unchanged file is not rewritten"; fi
+
+new_case; stub_all
+mkdir -p "$FAKE_HOME/.airlock/packs" "$CASE_DIR/elsewhere"
+ln -s "$CASE_DIR/elsewhere" "$(USER_PACK)"
+run_script
+assert_rc 0 "$RC" "a symlinked user pack is replaced, exiting 0"
+if [ -d "$(USER_PACK)" ] && [ ! -L "$(USER_PACK)" ]; then pass "a symlinked user pack becomes a real directory"
+else fail "a symlinked user pack becomes a real directory"; fi
+assert_eq "" "$(ls -A "$CASE_DIR/elsewhere")" "the symlink's target is left untouched"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/bin-link"
+ln -s "$SCRIPT" "$CASE_DIR/bin-link/airlock-claude"
+run_script_at "$CASE_DIR/bin-link/airlock-claude"
+assert_rc 0 "$RC" "a run through a symlink to the checkout's script exits 0"
+assert_exists "$(USER_PACK)/setup.sh" "a run through a symlink finds the checkout and installs the pack"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/a/b" "$CASE_DIR/bin-link"
+ln -s "$SCRIPT" "$CASE_DIR/a/b/hop"
+ln -s ../a/b/hop "$CASE_DIR/bin-link/airlock-claude"
+run_script_at "$CASE_DIR/bin-link/airlock-claude"
+assert_exists "$(USER_PACK)/setup.sh" "a chain of relative symlinks is followed to the checkout"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/copy"
+cp "$SCRIPT" "$CASE_DIR/copy/airlock-claude"
+run_script_at "$CASE_DIR/copy/airlock-claude"
+assert_rc 1 "$RC" "a copy outside the checkout with no installed pack exits 1"
+assert_grep "run airlock-claude once from its repository checkout" "$CASE_DIR/err" \
+  "a missing pack outside the checkout says how to install it"
+assert_absent "$(USER_PACK)" "a copy outside the checkout installs nothing"
+assert_not_grep "LAUNCH:" "$LOG" "a missing pack does not launch"
+
+new_case; stub_all
+mkdir -p "$CASE_DIR/copy"
+cp "$SCRIPT" "$CASE_DIR/copy/airlock-claude"
+run_script
+printf 'older\n' > "$(USER_PACK)/setup.sh"
+run_script_at "$CASE_DIR/copy/airlock-claude"
+assert_rc 0 "$RC" "a copy outside the checkout launches on an installed pack"
+assert_eq "older" "$(cat "$(USER_PACK)/setup.sh")" "a copy outside the checkout leaves the installed pack as it is"
+
+new_case; stub_all_but_airlock
+run_script
+assert_absent "$(USER_PACK)" "a missing airlock is reported before anything is installed"
+
+section "the sandbox's packs"
+new_case; stub_all
+run_script
+assert_grep "^CONFIG: config --format json$" "$LOG" "an existing sandbox's config is checked for the pack"
+assert_eq "CONFIG" "$(grep -o '^CONFIG\|^LAUNCH' "$LOG" | head -1)" "the check happens before the launch"
+
+new_case; stub_all
+export STUB_NO_PACK=1
+run_script
+assert_rc 1 "$RC" "a sandbox set up without the pack exits 1"
+assert_grep "run airlock-claude -r and select airlock-claude (local)" "$CASE_DIR/err" \
+  "a sandbox without the pack says how to get it"
+assert_not_grep "LAUNCH:" "$LOG" "a sandbox without the pack does not launch"
+
+new_case; stub_all
+export STUB_NO_PACK=1
+mkdir -p "$STUB_BOX"; : > "$STUB_BOX/disk.img"
+run_script -r
+assert_rc 0 "$RC" "-r skips the check, since the wizard runs again"
+assert_not_grep "^CONFIG:" "$LOG" "-r does not read the config the removal discards"
+
+new_case; stub_all
+export STUB_NO_PACK=1 STUB_NO_SANDBOX=1
+run_script
+assert_rc 0 "$RC" "a first run skips the check, since the wizard runs"
+assert_not_grep "^CONFIG:" "$LOG" "a first run reads no config"
+
+new_case; stub_all
+export STUB_NO_PACK=1 STUB_NO_SANDBOX=1
+printf '[packs]\nalpine = { version = "1" }\n' > "$WORK/airlock.toml"
+run_script
+assert_rc 1 "$RC" "a first run whose project config keeps the wizard away and lacks the pack exits 1"
+assert_grep 'add "~airlock-claude" = {} under \[packs\] in airlock.local.toml' "$CASE_DIR/err" \
+  "a project config without the pack is told where to add it"
+
+new_case; stub_all
+export STUB_NO_PACK=1
+mkdir -p "$STUB_BOX"; : > "$STUB_BOX/disk.img"
+printf '[packs]\nalpine = { version = "1" }\n' > "$WORK/airlock.toml"
+run_script -r
+assert_rc 1 "$RC" "-r on a project config without the pack exits 1"
+assert_not_grep "^REMOVE:" "$LOG" "-r on a project config without the pack is refused before anything is removed"
+
+new_case; stub_all
+export STUB_CONFIG_EXIT=1
+run_script
+assert_rc 1 "$RC" "a failed airlock config exits 1"
+assert_grep "airlock config failed" "$CASE_DIR/err" "a failed airlock config says so"
+assert_not_grep "LAUNCH:" "$LOG" "a failed airlock config does not launch"
 
 section "rebuild"
 new_case; stub_all
@@ -717,10 +898,10 @@ assert_not_grep "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" "$(SESSION_SCRIPT)" \
 
 new_case; stub_all
 run_script -c -T
-mkdir -p "$CASE_DIR/etc"
+mkdir -p "$CASE_DIR/etc/claude-code"; : > "$CASE_DIR/etc/claude-code/managed-settings.json"
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 bash -c "$(sed "s#/etc/#$CASE_DIR/etc/#g" "$(SESSION_SCRIPT)")" airlock-claude \
-  sh -c 'echo "nonessential=${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-unset}"' > "$CASE_DIR/prelude.out" 2>&1
-assert_grep "^nonessential=unset$" "$CASE_DIR/prelude.out" "the command -c hands off to no longer sees the setting"
+  sh -c 'echo "nonessential=${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-unset}"' > "$CASE_DIR/session.out" 2>&1
+assert_grep "^nonessential=unset$" "$CASE_DIR/session.out" "the command -c hands off to no longer sees the setting"
 
 new_case; stub_all
 mkdir -p "$CASE_DIR/other"

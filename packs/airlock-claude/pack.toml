@@ -1,0 +1,3 @@
+label = "airlock-claude"
+description = "tmux, bypass permissions and sandbox notes for airlock-claude"
+kind = "other"
